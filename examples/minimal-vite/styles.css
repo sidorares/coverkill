@@ -1,0 +1,13 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+}
+
+.used {
+  color: #0a0;
+}
+
+.unused-rule {
+  color: #f00;
+  display: none;
+}

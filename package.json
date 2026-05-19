@@ -1,0 +1,74 @@
+{
+  "name": "coverkill",
+  "version": "0.1.0",
+  "description": "Remove unused JS and CSS based on Chrome coverage reports",
+  "type": "module",
+  "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sidorares/coverkill.git"
+  },
+  "keywords": [
+    "coverage",
+    "playwright",
+    "dead-code",
+    "prune",
+    "css",
+    "javascript"
+  ],
+  "bin": {
+    "coverkill": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "example": "tsx src/cli.ts --config examples/minimal-vite/coverkill.config.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": false
+    }
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "cosmiconfig": "^9.0.0",
+    "fast-glob": "^3.3.3",
+    "jiti": "^2.4.2",
+    "picomatch": "^4.0.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/picomatch": "^4.0.0",
+    "playwright": "^1.51.0",
+    "tsup": "^8.4.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}

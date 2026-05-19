@@ -1,0 +1,11 @@
+{
+  "name": "coverkill-minimal-vite-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "serve -p 5173 --no-port-switching ."
+  },
+  "devDependencies": {
+    "serve": "^14.2.4"
+  }
+}
