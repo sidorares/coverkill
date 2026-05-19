@@ -10,6 +10,7 @@ export type ResolvedPruneTarget = {
   filePath: string;
   source: string;
   ranges: FileCoverageEntry['ranges'];
+  stubRanges: FileCoverageEntry['stubRanges'];
   kind: 'js' | 'css';
   url: string;
 };
@@ -68,11 +69,13 @@ export async function resolvePruneTargets(
     const existing = byPath.get(filePath);
     if (existing) {
       existing.ranges = mergeEntryRanges(existing.ranges, entry.ranges);
+      existing.stubRanges = mergeEntryRanges(existing.stubRanges ?? [], entry.stubRanges ?? []);
     } else {
       const target: ResolvedPruneTarget = {
         filePath,
         source,
         ranges: [...entry.ranges],
+        stubRanges: entry.stubRanges ? [...entry.stubRanges] : [],
         kind: entry.kind,
         url: entry.url,
       };

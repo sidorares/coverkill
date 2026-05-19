@@ -1,10 +1,16 @@
 import type { ByteRange } from '../coverage/types.js';
-import { invertRanges, mergeRanges } from '../coverage/merge.js';
+import { invertRanges, mergeRanges, subtractRanges } from '../coverage/merge.js';
+
+export type RemoveUncoveredOptions = {
+  preserveLicenseHeader?: boolean;
+  /** Uncovered ranges inside executed functions — replaced, not deleted */
+  stubRanges?: ByteRange[];
+};
 
 export function removeUncoveredRanges(
   source: string,
   covered: ByteRange[],
-  options?: { preserveLicenseHeader?: boolean },
+  options?: RemoveUncoveredOptions,
 ): string {
   if (covered.length === 0) {
     return source;
@@ -23,20 +29,67 @@ export function removeUncoveredRanges(
     protectedEnd = Math.max(protectedEnd, licenseEnd);
   }
 
+  const stubs = mergeRanges(options?.stubRanges ?? []);
+  const effectiveCovered = stubs.length > 0 ? subtractRanges(merged, stubs) : merged;
+
   const adjustedCovered =
     protectedEnd > 0
-      ? mergeRanges([{ start: 0, end: protectedEnd }, ...merged])
-      : merged;
+      ? mergeRanges([{ start: 0, end: protectedEnd }, ...effectiveCovered])
+      : effectiveCovered;
 
   const uncovered = invertRanges(source.length, adjustedCovered);
+  const ops = buildPruneOps(uncovered, stubs);
   let result = source;
 
-  for (let i = uncovered.length - 1; i >= 0; i--) {
-    const range = uncovered[i]!;
-    result = result.slice(0, range.start) + result.slice(range.end);
+  for (const op of ops) {
+    const replacement =
+      op.kind === 'stub' ? stubReplacement(source, op.start, op.end) : '';
+    result = result.slice(0, op.start) + replacement + result.slice(op.end);
   }
 
   return postProcess(result);
+}
+
+type PruneOp = { kind: 'delete' | 'stub'; start: number; end: number };
+
+function buildPruneOps(uncovered: ByteRange[], stubs: ByteRange[]): PruneOp[] {
+  const ops: PruneOp[] = [];
+
+  for (const u of uncovered) {
+    let pos = u.start;
+    for (const stub of stubs) {
+      if (stub.end <= pos || stub.start >= u.end) continue;
+      const stubStart = Math.max(stub.start, pos);
+      const stubEnd = Math.min(stub.end, u.end);
+      if (stubStart > pos) {
+        ops.push({ kind: 'delete', start: pos, end: stubStart });
+      }
+      ops.push({ kind: 'stub', start: stubStart, end: stubEnd });
+      pos = stubEnd;
+    }
+    if (pos < u.end) {
+      ops.push({ kind: 'delete', start: pos, end: u.end });
+    }
+  }
+
+  return ops.sort((a, b) => b.start - a.start);
+}
+
+/** Replace an uncovered branch/block while keeping surrounding syntax valid. */
+export function stubReplacement(source: string, start: number, end: number): string {
+  const text = source.slice(start, end);
+  const elseMatch = text.match(/^(\s*)else\b/);
+  if (elseMatch) {
+    return `${elseMatch[1]}else {}`;
+  }
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return '{}';
+  }
+  if (text.includes('\n')) {
+    return '{}';
+  }
+  return ';';
 }
 
 function detectLicenseHeaderEnd(source: string, fromOffset: number): number {

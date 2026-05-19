@@ -44,7 +44,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "example": "tsx src/cli.ts --config examples/minimal-vite/coverkill.config.ts",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"

@@ -86,8 +86,10 @@ By default, matching files are **modified in place**. Use git so you can revert.
 
 1. Launches Chromium and starts JS/CSS coverage.
 2. Runs each scenario module (default export or `scenario` named export).
-3. Merges executed byte ranges per file.
-4. Removes uncovered ranges from allowlisted files (in place).
+3. Merges executed byte ranges per file (V8 block coverage for JS, used ranges for CSS).
+4. Prunes allowlisted files in place:
+   - **Never-called functions** — uncovered bytes are removed.
+   - **Called functions with unexecuted branches** — those branch ranges are replaced with `else {}`, `{}`, or `;` so syntax stays valid (not deleted).
 
 Coverage reflects **what the browser executed** (often built assets). To prune original `src/`, either serve sources directly, point `sourcePath` at the built files you want to shrink, or wait for future source-map support.
 

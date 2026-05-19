@@ -53,6 +53,7 @@ async function pruneTarget(
   const bytesBefore = Buffer.byteLength(target.source, 'utf8');
   const pruned = removeUncoveredRanges(target.source, target.ranges, {
     preserveLicenseHeader: config.preserveLicenseHeader,
+    stubRanges: target.kind === 'js' ? target.stubRanges : undefined,
   });
   const bytesAfter = Buffer.byteLength(pruned, 'utf8');
   const uncovered = invertRanges(target.source.length, target.ranges);
