@@ -1,10 +1,12 @@
 import type { ByteRange } from '../coverage/types.js';
 import { invertRanges, mergeRanges, subtractRanges } from '../coverage/merge.js';
+import { removeUncoveredRangesAst } from './ast-prune.js';
 
 export type RemoveUncoveredOptions = {
   preserveLicenseHeader?: boolean;
   /** Uncovered ranges inside executed functions — replaced, not deleted */
   stubRanges?: ByteRange[];
+  kind?: 'js' | 'css';
 };
 
 export function removeUncoveredRanges(
@@ -14,6 +16,25 @@ export function removeUncoveredRanges(
 ): string {
   if (covered.length === 0) {
     return source;
+  }
+
+  const kind = options?.kind ?? 'js';
+
+  if (kind === 'js') {
+    const astResult = removeUncoveredRangesAst(source, covered, options);
+    if (astResult !== null) {
+      return astResult;
+    }
+    if (process.env.COVERKILL_BYTE_PRUNE === '1') {
+      console.warn(
+        '[coverkill] AST prune failed; falling back to byte pruning (COVERKILL_BYTE_PRUNE=1).',
+      );
+    } else {
+      console.warn(
+        '[coverkill] AST prune failed; leaving JS unchanged. Rebuild coverkill, ensure acorn is installed, or set COVERKILL_BYTE_PRUNE=1 to force legacy byte pruning.',
+      );
+      return source;
+    }
   }
 
   const merged = mergeRanges(covered);
@@ -89,7 +110,7 @@ export function stubReplacement(source: string, start: number, end: number): str
   if (text.includes('\n')) {
     return '{}';
   }
-  return ';';
+  return '0';
 }
 
 function detectLicenseHeaderEnd(source: string, fromOffset: number): number {

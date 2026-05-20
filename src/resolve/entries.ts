@@ -46,25 +46,29 @@ export async function resolvePruneTargets(
       continue;
     }
 
-    let source: string;
+    let diskSource: string | undefined;
     try {
-      source = await readFile(filePath, 'utf8');
+      diskSource = await readFile(filePath, 'utf8');
     } catch {
-      if (entry.source) {
-        source = entry.source;
-      } else {
+      if (!entry.source) {
         skipped.push({ url: entry.url, reason: `file not found: ${filePath}` });
         continue;
       }
     }
 
-    if (entry.source && !contentMatchesDisk(entry.source, source)) {
+    if (entry.source && diskSource !== undefined && !contentMatchesDisk(entry.source, diskSource)) {
       skipped.push({
         url: entry.url,
         reason: `on-disk content does not match coverage source for ${filePath}`,
       });
       continue;
     }
+
+    // Byte offsets in the report refer to the script text V8 executed — prefer that over disk.
+    const source =
+      entry.source && entry.source.length > 0
+        ? entry.source
+        : (diskSource ?? '');
 
     const existing = byPath.get(filePath);
     if (existing) {

@@ -6,6 +6,7 @@ import type { ResolvedCoverkillConfig } from '../config/types.js';
 import type { CoverageReport } from '../coverage/types.js';
 import { invertRanges, rangesToLineNumbers } from '../coverage/merge.js';
 import { resolvePruneTargets, type ResolvedPruneTarget } from '../resolve/entries.js';
+import * as acorn from 'acorn';
 import { removeUncoveredRanges } from './ranges.js';
 
 export type PruneOptions = {
@@ -51,10 +52,18 @@ async function pruneTarget(
   options: PruneOptions,
 ): Promise<PruneFileResult> {
   const bytesBefore = Buffer.byteLength(target.source, 'utf8');
-  const pruned = removeUncoveredRanges(target.source, target.ranges, {
+  let pruned = removeUncoveredRanges(target.source, target.ranges, {
     preserveLicenseHeader: config.preserveLicenseHeader,
     stubRanges: target.kind === 'js' ? target.stubRanges : undefined,
+    kind: target.kind,
   });
+
+  if (target.kind === 'js' && pruned !== target.source && !isValidJs(pruned)) {
+    console.warn(
+      `[coverkill] ${target.filePath}: pruned output is invalid JS; file left unchanged.`,
+    );
+    pruned = target.source;
+  }
   const bytesAfter = Buffer.byteLength(pruned, 'utf8');
   const uncovered = invertRanges(target.source.length, target.ranges);
   const uncoveredLines = rangesToLineNumbers(target.source, uncovered);
@@ -111,6 +120,19 @@ export function formatPruneResult(result: PruneResult, dryRun: boolean): string 
   }
 
   return lines.join('\n');
+}
+
+function isValidJs(source: string): boolean {
+  try {
+    acorn.parse(source, {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      allowHashBang: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function summarizeLines(lines: number[], max = 12): string {

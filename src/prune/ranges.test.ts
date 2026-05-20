@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { removeUncoveredRanges, stubReplacement } from './ranges.js';
 
 describe('removeUncoveredRanges', () => {
-  it('removes uncovered byte ranges', () => {
+  it('removes uncovered byte ranges (CSS)', () => {
     const source = 'aaaaBBBBcccc';
     const covered = [{ start: 4, end: 8 }];
-    expect(removeUncoveredRanges(source, covered)).toBe('BBBB');
+    expect(removeUncoveredRanges(source, covered, { kind: 'css' })).toBe('BBBB');
   });
 
   it('preserves shebang', () => {
@@ -42,7 +42,7 @@ describe('removeUncoveredRanges', () => {
       '}',
     ].join('\n');
     const elseStart = source.indexOf(' else {');
-    const elseEnd = source.lastIndexOf('}') + 1;
+    const elseEnd = source.indexOf('}', elseStart) + 1;
     const fnStart = source.indexOf('function');
     const fnEnd = source.lastIndexOf('}') + 1;
     // Parent block is "covered" but the else branch has count 0 in V8.
