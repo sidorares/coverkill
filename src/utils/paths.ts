@@ -1,9 +1,10 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export function defaultSourcePath(url: string, rootDir: string): string | null {
   if (url.startsWith('file://')) {
     try {
-      return path.resolve(new URL(url).pathname);
+      return fileURLToPath(url);
     } catch {
       return null;
     }

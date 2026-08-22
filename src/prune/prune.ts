@@ -2,10 +2,10 @@ import { writeFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import type { ResolvedCoverkillConfig } from '../config/types.js';
-import type { CoverageReport } from '../coverage/types.js';
-import { invertRanges, rangesToLineNumbers } from '../coverage/merge.js';
-import { resolvePruneTargets, type ResolvedPruneTarget } from '../resolve/entries.js';
+import type { ResolvedPruneConfig } from '../config/types.js';
+import type { CoverageReport } from '../report/types.js';
+import { invertRanges, rangesToLineNumbers } from '../report/merge.js';
+import { resolvePruneTargets, type ResolvedPruneTarget } from './resolve.js';
 import * as acorn from 'acorn';
 import { removeUncoveredRanges } from './ranges.js';
 
@@ -32,7 +32,7 @@ export type PruneResult = {
 
 export async function pruneFromReport(
   report: CoverageReport,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedPruneConfig,
   options: PruneOptions = {},
 ): Promise<PruneResult> {
   const { targets, skipped } = await resolvePruneTargets(report, config);
@@ -48,7 +48,7 @@ export async function pruneFromReport(
 
 async function pruneTarget(
   target: ResolvedPruneTarget,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedPruneConfig,
   options: PruneOptions,
 ): Promise<PruneFileResult> {
   const bytesBefore = Buffer.byteLength(target.source, 'utf8');

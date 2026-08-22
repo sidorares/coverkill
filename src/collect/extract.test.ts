@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractJsCoverage } from './collect.js';
+import { extractJsCoverage } from './extract.js';
 
 describe('extractJsCoverage', () => {
   it('collects covered ranges and stubs zero-count blocks in executed functions', () => {

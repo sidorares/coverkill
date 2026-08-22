@@ -1,7 +1,7 @@
 import * as acorn from 'acorn';
 import type { Node, Program } from 'acorn';
-import type { ByteRange } from '../coverage/types.js';
-import { invertRanges, mergeRanges, subtractRanges } from '../coverage/merge.js';
+import type { ByteRange } from '../report/types.js';
+import { invertRanges, mergeRanges, subtractRanges } from '../report/merge.js';
 import type { RemoveUncoveredOptions } from './ranges.js';
 
 type PruneOp = { kind: 'delete' | 'stub'; start: number; end: number };

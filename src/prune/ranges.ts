@@ -1,5 +1,5 @@
-import type { ByteRange } from '../coverage/types.js';
-import { invertRanges, mergeRanges, subtractRanges } from '../coverage/merge.js';
+import type { ByteRange } from '../report/types.js';
+import { invertRanges, mergeRanges, subtractRanges } from '../report/merge.js';
 import { removeUncoveredRangesAst } from './ast-prune.js';
 
 export type RemoveUncoveredOptions = {

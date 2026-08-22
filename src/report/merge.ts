@@ -3,9 +3,11 @@ import type { ByteRange } from './types.js';
 export function mergeRanges(ranges: ByteRange[]): ByteRange[] {
   if (ranges.length === 0) return [];
 
-  const sorted = [...ranges]
+  const sorted = ranges
     .filter((r) => r.end > r.start)
+    .map((r) => ({ start: r.start, end: r.end }))
     .sort((a, b) => a.start - b.start || a.end - b.end);
+  if (sorted.length === 0) return [];
 
   const merged: ByteRange[] = [sorted[0]!];
 

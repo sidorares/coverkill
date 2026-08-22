@@ -28,6 +28,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./collect": {
+      "types": "./dist/collect/index.d.ts",
+      "import": "./dist/collect/index.js"
+    },
+    "./prune": {
+      "types": "./dist/prune/index.d.ts",
+      "import": "./dist/prune/index.js"
     }
   },
   "main": "./dist/index.js",
@@ -51,7 +59,7 @@
   },
   "peerDependenciesMeta": {
     "playwright": {
-      "optional": false
+      "optional": true
     }
   },
   "dependencies": {

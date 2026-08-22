@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
-import type { ResolvedCoverkillConfig } from '../config/types.js';
-import { mergeRanges } from '../coverage/merge.js';
-import type { CoverageReport, FileCoverageEntry } from '../coverage/types.js';
+import type { ResolvedPruneConfig } from '../config/types.js';
+import { mergeRanges } from '../report/merge.js';
+import type { CoverageReport, FileCoverageEntry } from '../report/types.js';
 import { createMatchers } from '../utils/globs.js';
 import { contentMatchesDisk, defaultSourcePath } from '../utils/paths.js';
 
@@ -22,7 +22,7 @@ export type ResolveResult = {
 
 export async function resolvePruneTargets(
   report: CoverageReport,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedPruneConfig,
 ): Promise<ResolveResult> {
   const { isIncluded } = createMatchers(config.rootDir, config.include, config.exclude);
   const targets: ResolvedPruneTarget[] = [];
@@ -72,6 +72,16 @@ export async function resolvePruneTargets(
 
     const existing = byPath.get(filePath);
     if (existing) {
+      // Ranges are offsets into the script text; entries whose text differs
+      // (e.g. two inline scripts sharing a page URL) are in different
+      // coordinate spaces and must not be merged.
+      if (existing.source !== source) {
+        skipped.push({
+          url: entry.url,
+          reason: `coverage entries for ${filePath} have different source text; cannot merge ranges`,
+        });
+        continue;
+      }
       existing.ranges = mergeEntryRanges(existing.ranges, entry.ranges);
       existing.stubRanges = mergeEntryRanges(existing.stubRanges ?? [], entry.stubRanges ?? []);
     } else {
@@ -91,7 +101,7 @@ export async function resolvePruneTargets(
   return { targets, skipped };
 }
 
-function resolveFilePath(url: string, config: ResolvedCoverkillConfig): string | null {
+function resolveFilePath(url: string, config: ResolvedPruneConfig): string | null {
   const custom = config.sourcePath?.(url);
   const raw = custom ?? defaultSourcePath(url, config.rootDir);
   if (!raw) return null;

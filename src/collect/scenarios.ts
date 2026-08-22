@@ -3,7 +3,7 @@ import fg from 'fast-glob';
 import { stat } from 'node:fs/promises';
 import { createJiti } from 'jiti';
 import type { Page } from 'playwright';
-import type { ResolvedCoverkillConfig, ScenarioFn } from '../config/types.js';
+import type { ResolvedCollectConfig, ScenarioFn } from '../config/types.js';
 
 const SCENARIO_EXTENSIONS = new Set(['.ts', '.js', '.mts', '.mjs']);
 
@@ -51,7 +51,7 @@ function isScenarioFile(filePath: string): boolean {
 
 export async function runScenarios(
   page: Page,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedCollectConfig,
 ): Promise<void> {
   const files = await expandScenarioPaths(config.scenarios);
   if (files.length === 0) {
