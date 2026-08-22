@@ -46,17 +46,26 @@ export async function resolvePruneTargets(
       continue;
     }
 
+    // Range offsets are only meaningful against the exact text V8 executed.
+    // Without it we cannot verify the disk file is in the same coordinate
+    // space, so pruning would be a blind byte-slice of the wrong text.
+    if (!entry.source) {
+      skipped.push({
+        url: entry.url,
+        reason: 'report entry has no embedded source text (skipped for safety)',
+      });
+      continue;
+    }
+
     let diskSource: string | undefined;
     try {
       diskSource = await readFile(filePath, 'utf8');
     } catch {
-      if (!entry.source) {
-        skipped.push({ url: entry.url, reason: `file not found: ${filePath}` });
-        continue;
-      }
+      skipped.push({ url: entry.url, reason: `file not found: ${filePath}` });
+      continue;
     }
 
-    if (entry.source && diskSource !== undefined && !contentMatchesDisk(entry.source, diskSource)) {
+    if (!contentMatchesDisk(entry.source, diskSource)) {
       skipped.push({
         url: entry.url,
         reason: `on-disk content does not match coverage source for ${filePath}`,
@@ -65,10 +74,7 @@ export async function resolvePruneTargets(
     }
 
     // Byte offsets in the report refer to the script text V8 executed — prefer that over disk.
-    const source =
-      entry.source && entry.source.length > 0
-        ? entry.source
-        : (diskSource ?? '');
+    const source = entry.source;
 
     const existing = byPath.get(filePath);
     if (existing) {
@@ -102,8 +108,11 @@ export async function resolvePruneTargets(
 }
 
 function resolveFilePath(url: string, config: ResolvedPruneConfig): string | null {
-  const custom = config.sourcePath?.(url);
-  const raw = custom ?? defaultSourcePath(url, config.rootDir);
+  // When the user supplies sourcePath, its answer is final: an explicit null
+  // means "do not prune this URL", never "fall back to guessing".
+  const raw = config.sourcePath
+    ? config.sourcePath(url)
+    : defaultSourcePath(url, config.rootDir);
   if (!raw) return null;
   return path.isAbsolute(raw) ? raw : path.resolve(config.rootDir, raw);
 }

@@ -6,7 +6,7 @@ import type { ResolvedPruneConfig } from '../config/types.js';
 import type { CoverageReport } from '../report/types.js';
 import { invertRanges, rangesToLineNumbers } from '../report/merge.js';
 import { resolvePruneTargets, type ResolvedPruneTarget } from './resolve.js';
-import * as acorn from 'acorn';
+import { isParseableJs } from './ast-prune.js';
 import { removeUncoveredRanges } from './ranges.js';
 
 export type PruneOptions = {
@@ -56,9 +56,10 @@ async function pruneTarget(
     preserveLicenseHeader: config.preserveLicenseHeader,
     stubRanges: target.kind === 'js' ? target.stubRanges : undefined,
     kind: target.kind,
+    cssSafelist: config.cssSafelist,
   });
 
-  if (target.kind === 'js' && pruned !== target.source && !isValidJs(pruned)) {
+  if (target.kind === 'js' && pruned !== target.source && !isParseableJs(pruned)) {
     console.warn(
       `[coverkill] ${target.filePath}: pruned output is invalid JS; file left unchanged.`,
     );
@@ -120,19 +121,6 @@ export function formatPruneResult(result: PruneResult, dryRun: boolean): string 
   }
 
   return lines.join('\n');
-}
-
-function isValidJs(source: string): boolean {
-  try {
-    acorn.parse(source, {
-      ecmaVersion: 'latest',
-      sourceType: 'script',
-      allowHashBang: true,
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function summarizeLines(lines: number[], max = 12): string {

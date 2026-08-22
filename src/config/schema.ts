@@ -38,6 +38,7 @@ const rawConfigSchema = z.object({
   include: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
   preserveLicenseHeader: z.boolean().optional(),
+  cssSafelist: z.array(z.string()).optional(),
 });
 
 export function parseConfig(

@@ -52,6 +52,8 @@ export type PruneConfigInput = {
   exclude?: string[];
   sourcePath?: (url: string) => string | null;
   preserveLicenseHeader?: boolean;
+  /** Regex sources; CSS rules whose selector/prelude matches are always kept. */
+  cssSafelist?: string[];
 };
 
 /** The coverkill config file: the collect and prune halves share one file. */
@@ -75,6 +77,7 @@ export type ResolvedPruneConfig = {
   exclude?: string[];
   sourcePath?: (url: string) => string | null;
   preserveLicenseHeader: boolean;
+  cssSafelist?: string[];
 };
 
 export type ResolvedCoverkillConfig = ResolvedCollectConfig & ResolvedPruneConfig;

@@ -1,12 +1,15 @@
 import type { ByteRange } from '../report/types.js';
 import { invertRanges, mergeRanges, subtractRanges } from '../report/merge.js';
 import { removeUncoveredRangesAst } from './ast-prune.js';
+import { pruneCss } from './css.js';
 
 export type RemoveUncoveredOptions = {
   preserveLicenseHeader?: boolean;
   /** Uncovered ranges inside executed functions — replaced, not deleted */
   stubRanges?: ByteRange[];
   kind?: 'js' | 'css';
+  /** CSS only: regex sources; matching selectors/preludes are always kept */
+  cssSafelist?: string[];
 };
 
 export function removeUncoveredRanges(
@@ -20,21 +23,31 @@ export function removeUncoveredRanges(
 
   const kind = options?.kind ?? 'js';
 
-  if (kind === 'js') {
-    const astResult = removeUncoveredRangesAst(source, covered, options);
-    if (astResult !== null) {
-      return astResult;
+  if (kind === 'css') {
+    const pruned = pruneCss(source, mergeRanges(covered), { safelist: options?.cssSafelist });
+    if (options?.preserveLicenseHeader && pruned !== source) {
+      const licenseEnd = detectLicenseHeaderEnd(source, 0);
+      const header = source.slice(0, licenseEnd);
+      if (licenseEnd > 0 && !pruned.startsWith(header)) {
+        return header + pruned;
+      }
     }
-    if (process.env.COVERKILL_BYTE_PRUNE === '1') {
-      console.warn(
-        '[coverkill] AST prune failed; falling back to byte pruning (COVERKILL_BYTE_PRUNE=1).',
-      );
-    } else {
-      console.warn(
-        '[coverkill] AST prune failed; leaving JS unchanged. Rebuild coverkill, ensure acorn is installed, or set COVERKILL_BYTE_PRUNE=1 to force legacy byte pruning.',
-      );
-      return source;
-    }
+    return pruned;
+  }
+
+  const astResult = removeUncoveredRangesAst(source, covered, options);
+  if (astResult !== null) {
+    return astResult;
+  }
+  if (process.env.COVERKILL_BYTE_PRUNE === '1') {
+    console.warn(
+      '[coverkill] AST prune failed; falling back to byte pruning (COVERKILL_BYTE_PRUNE=1).',
+    );
+  } else {
+    console.warn(
+      '[coverkill] AST prune failed (source does not parse as JS); leaving file unchanged. Set COVERKILL_BYTE_PRUNE=1 to force legacy byte pruning.',
+    );
+    return source;
   }
 
   const merged = mergeRanges(covered);
@@ -50,13 +63,13 @@ export function removeUncoveredRanges(
     protectedEnd = Math.max(protectedEnd, licenseEnd);
   }
 
-  const stubs = mergeRanges(options?.stubRanges ?? []);
-  const effectiveCovered = stubs.length > 0 ? subtractRanges(merged, stubs) : merged;
+  // Covered-wins: a range that executed anywhere is never stubbed out.
+  const stubs = subtractRanges(mergeRanges(options?.stubRanges ?? []), merged);
 
   const adjustedCovered =
     protectedEnd > 0
-      ? mergeRanges([{ start: 0, end: protectedEnd }, ...effectiveCovered])
-      : effectiveCovered;
+      ? mergeRanges([{ start: 0, end: protectedEnd }, ...merged])
+      : merged;
 
   const uncovered = invertRanges(source.length, adjustedCovered);
   const ops = buildPruneOps(uncovered, stubs);
