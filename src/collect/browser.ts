@@ -1,7 +1,7 @@
 import type { Browser, Page } from 'playwright';
 import type { ResolvedCollectConfig } from '../config/types.js';
 import type { CoverageReport } from '../report/types.js';
-import { buildCoverageReport } from './extract.js';
+import { buildCoverageReportV2 } from './extract.js';
 import { loadScenarios } from './scenarios.js';
 import { startWebServer, stopWebServer, type WebServerHandle } from './webServer.js';
 
@@ -77,7 +77,10 @@ export async function collectCoverage(
     }
 
     const js = await page.coverage.stopJSCoverage();
-    const report = buildCoverageReport(config.rootDir, js, css);
+    const report = buildCoverageReportV2(config.rootDir, js, css, {
+      coverageSettings: { js: config.coverage.js, css: config.coverage.css },
+      includeSource: config.report.includeSource,
+    });
 
     if (options.onReport) {
       await options.onReport(report);

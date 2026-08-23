@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CoverkillConfig, ResolvedCoverkillConfig } from './types.js';
+import type { CoverkillConfig, ResolvedCoverkillConfig, ResolvedPruneConfig } from './types.js';
 
 const webServerSchema = z.object({
   command: z.string().min(1),
@@ -28,6 +28,10 @@ const browserSchema = z.object({
   channel: z.string().optional(),
 });
 
+const reportSchema = z.object({
+  includeSource: z.boolean().optional(),
+});
+
 const rawConfigSchema = z.object({
   baseURL: z.string().url(),
   rootDir: z.string().optional(),
@@ -35,11 +39,39 @@ const rawConfigSchema = z.object({
   webServer: webServerSchema.optional(),
   coverage: coverageSchema.optional(),
   browser: browserSchema.optional(),
+  report: reportSchema.optional(),
   include: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
   preserveLicenseHeader: z.boolean().optional(),
   cssSafelist: z.array(z.string()).optional(),
 });
+
+/**
+ * The prune half only. `coverkill prune` rewrites files from a report and
+ * never opens a browser, so demanding `baseURL`/`scenarios` from it would keep
+ * anyone pruning externally-collected coverage from using the tool at all.
+ * Collect-only keys in the same config file are ignored here.
+ */
+const prunePartialSchema = z.object({
+  rootDir: z.string().optional(),
+  include: z.array(z.string()).optional(),
+  exclude: z.array(z.string()).optional(),
+  preserveLicenseHeader: z.boolean().optional(),
+  cssSafelist: z.array(z.string()).optional(),
+});
+
+export function parsePruneConfig(
+  raw: unknown,
+  sourcePathFn?: CoverkillConfig['sourcePath'],
+): ResolvedPruneConfig {
+  const parsed = prunePartialSchema.parse(raw);
+  return {
+    ...parsed,
+    rootDir: parsed.rootDir ?? process.cwd(),
+    sourcePath: sourcePathFn,
+    preserveLicenseHeader: parsed.preserveLicenseHeader ?? true,
+  };
+}
 
 export function parseConfig(
   raw: unknown,
@@ -66,6 +98,7 @@ export function parseConfig(
       },
     },
     browser: parsed.browser ?? { headless: true },
+    report: { includeSource: parsed.report?.includeSource ?? true },
     preserveLicenseHeader: parsed.preserveLicenseHeader ?? true,
   };
 }

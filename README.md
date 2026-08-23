@@ -14,6 +14,11 @@ coverkill has two halves with a JSON coverage report as the contract between the
 `coverkill run` composes both; `coverkill collect` and `coverkill prune` run them
 separately (for example: collect in CI, review the report, prune later).
 
+The report carries V8's own numbers, so **coverkill can prune coverage it did not
+collect**: a `NODE_V8_COVERAGE` directory, a `@playwright/test` or Puppeteer
+coverage dump, or a Chrome DevTools Coverage panel export all go straight into
+`coverkill prune`. See [Pruning coverage from other tools](#pruning-coverage-from-other-tools).
+
 ## Install
 
 ```bash
@@ -75,7 +80,8 @@ By default, matching files are **modified in place**. Use git so you can revert.
 |---------|-------------|
 | `coverkill` / `coverkill run` | Collect coverage and prune |
 | `coverkill collect` | Collect coverage and write a report file |
-| `coverkill prune --report <file>` | Prune from a saved JSON report |
+| `coverkill prune --report <file>` | Prune from a saved report, a raw V8 coverage file, or a `NODE_V8_COVERAGE` directory |
+| `coverkill import <inputs...>` | Convert raw V8 / DevTools coverage into a coverkill report |
 
 ### Flags
 
@@ -85,6 +91,73 @@ By default, matching files are **modified in place**. Use git so you can revert.
 - `collect -o, --out <path>` — report destination (default `coverkill-coverage.json`)
 - `prune -r, --report <path>` — report to prune from (required)
 - `prune --dry-run` — show what would be removed without writing
+- `import -o, --out <path>` — report destination (default `coverkill-coverage.json`)
+- `import --root-dir <path>` — `rootDir` recorded in the report (default: cwd)
+- `import --strip-source` — store only source hashes, not the source text
+
+`prune` and `import` use only the prune half of the config, so a config file for
+them needs no `baseURL` or `scenarios`.
+
+## Pruning coverage from other tools
+
+Any V8 coverage is usable, whoever produced it:
+
+```bash
+# An existing Playwright/Vitest/Node run
+NODE_V8_COVERAGE=./cov node ./dist/server.js
+npx coverkill prune -r ./cov --dry-run
+
+# Or convert first, review the report, prune later
+npx coverkill import ./cov -o coverage.json --strip-source
+npx coverkill prune -r coverage.json
+```
+
+Accepted inputs:
+
+| Input | Shape |
+|-------|-------|
+| `NODE_V8_COVERAGE` directory or one of its dumps | `{ "result": [ { url, functions } ] }` |
+| CDP `Profiler.takePreciseCoverage` | same |
+| Playwright `page.coverage.stopJSCoverage()` JSON | `[ { url, source, functions } ]` |
+| Playwright `stopCSSCoverage()` / DevTools Coverage export | `[ { url, text, ranges } ]` |
+
+Used-ranges-only inputs (the last row) carry no execution counts, so there is no
+way to tell an unexecuted branch from a never-called function: every used range
+counts as executed and everything else as never executed.
+
+Entries without embedded source text are matched to disk by a `sha256-` hash, so
+a file edited between collection and pruning is skipped rather than mis-sliced.
+For that guard to exist at all, an imported entry needs either its source text
+or a `file://` URL that coverkill can hash at import time; entries with neither
+are skipped. When hashing from disk, the file must still fit the coverage
+offsets (V8's whole-script range spans exactly the text it compiled) — a file
+already edited by the time you import is left unverifiable, and skipped.
+
+### Report format
+
+`coverkill collect` writes **report v2**, which carries V8's `ScriptCoverage`
+verbatim — counts, function names, and block-coverage flags intact:
+
+```jsonc
+{
+  "version": 2,
+  "meta": { "collectedAt": "…", "offsets": "utf16CodeUnits", "coverageSettings": { … } },
+  "rootDir": "/path/to/project",
+  "scripts": [
+    {
+      "url": "http://localhost:3000/app.js",
+      "sourceType": "module",
+      "sourceHash": "sha256-…",
+      "source": "…",              // optional; set report.includeSource=false to omit
+      "functions": [ /* raw V8 ranges, counts intact */ ]
+    }
+  ],
+  "stylesheets": [ { "url": "…", "sourceHash": "…", "ranges": [ { "start": 0, "end": 42 } ] } ]
+}
+```
+
+Because the counts survive, covered / stub / dead is decided when you prune, not
+when you collect. Report v1 (pre-classified byte ranges) is still read.
 
 ## Config
 
@@ -98,6 +171,7 @@ One config file feeds both halves. Collect-side options:
 | `browser` | `headless`, `channel` |
 | `coverage.js` | `resetOnNavigation`, `reportAnonymousScripts` (both default `false`) |
 | `coverage.css` | `false` to disable, or `{ resetOnNavigation }` (default enabled, no reset) |
+| `report.includeSource` | Embed executed source text in the report (default `true`); `false` keeps only its hash |
 
 Prune-side options:
 
@@ -122,7 +196,8 @@ process working directory.
    covered range. Bytes are classified covered / stub (unexecuted branch inside
    a function that ran) / dead (inside a function that never ran).
 3. Maps URLs to disk files (`sourcePath`, then `include`/`exclude`), skipping
-   any file whose on-disk content no longer matches what the browser executed.
+   any file whose on-disk content no longer matches what the browser executed
+   (by text when the report embeds it, by `sourceHash` when it does not).
 4. Prunes JS on the AST (acorn; ES modules and scripts both supported). Edits
    only ever replace bytes inside uncovered ranges:
    - dead functions are deleted — or hollowed to `function name() {}` when
@@ -196,6 +271,16 @@ Or use the halves directly — `coverkill/prune` never imports playwright:
 ```ts
 import { collectCoverage } from 'coverkill/collect';
 import { pruneFromReport, loadReport } from 'coverkill/prune';
+```
+
+To prune coverage collected by your own runner, hand the raw payload to
+`importV8Coverage` (pure) or `importV8CoverageFiles` (reads files/directories):
+
+```ts
+import { importV8Coverage, pruneFromReport } from 'coverkill/prune';
+
+const report = importV8Coverage(await page.coverage.stopJSCoverage(), { rootDir });
+await pruneFromReport(report, { rootDir, include: ['dist/**'], preserveLicenseHeader: true });
 ```
 
 ## License
