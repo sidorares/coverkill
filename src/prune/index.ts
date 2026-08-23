@@ -11,6 +11,7 @@ export {
   type PruneFileResult,
 } from './prune.js';
 export { removeUncoveredRanges, type RemoveUncoveredOptions } from './ranges.js';
+export { PRUNE_MODES, BEACON_GLOBAL, type PruneMode } from './stubs.js';
 export { resolvePruneTargets, type ResolvedPruneTarget, type ResolveResult } from './resolve.js';
 export { loadReport, validateReport } from '../report/io.js';
 export { normalizeReport, type NormalizedReport } from '../report/normalize.js';

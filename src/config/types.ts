@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import type { PruneMode } from '../prune/stubs.js';
 
 export type ScenarioContext = {
   page: Page;
@@ -65,6 +66,14 @@ export type PruneConfigInput = {
   preserveLicenseHeader?: boolean;
   /** Regex sources; CSS rules whose selector/prelude matches are always kept. */
   cssSafelist?: string[];
+  /**
+   * How JS stubs behave when a pruned path executes anyway (default 'silent').
+   * 'throw' makes every stub throw a descriptive error; 'beacon' calls
+   * `globalThis.__coverkillPrunedPathHit?.('file:line')` and then behaves like
+   * the silent stub. Run a throw/beacon build in staging first, ship the
+   * silent build once nothing fires.
+   */
+  pruneMode?: PruneMode;
 };
 
 /** The coverkill config file: the collect and prune halves share one file. */
@@ -90,6 +99,8 @@ export type ResolvedPruneConfig = {
   sourcePath?: (url: string) => string | null;
   preserveLicenseHeader: boolean;
   cssSafelist?: string[];
+  /** Default 'silent'; config loading always resolves it explicitly. */
+  pruneMode?: PruneMode;
 };
 
 export type ResolvedCoverkillConfig = ResolvedCollectConfig & ResolvedPruneConfig;

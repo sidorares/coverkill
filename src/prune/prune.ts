@@ -59,6 +59,8 @@ async function pruneTarget(
     kind: target.kind,
     sourceType: target.kind === 'js' ? target.sourceType : undefined,
     cssSafelist: config.cssSafelist,
+    pruneMode: target.kind === 'js' ? config.pruneMode : undefined,
+    stubLabel: stubLabelFor(config.rootDir, target.filePath),
   });
 
   if (
@@ -93,6 +95,14 @@ async function pruneTarget(
     uncoveredLines,
     written,
   };
+}
+
+/** Loud stubs cite `label:line`; a rootDir-relative path keeps it greppable. */
+function stubLabelFor(rootDir: string, filePath: string): string {
+  const relative = path.relative(rootDir, filePath);
+  return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+    ? relative
+    : filePath;
 }
 
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {

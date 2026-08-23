@@ -5,6 +5,8 @@ import { importV8CoverageFiles } from './report/import.js';
 import { mergeReports } from './report/merge-reports.js';
 import type { CoverageReport, CoverageReportV2 } from './report/types.js';
 import { pruneFromReport, formatPruneResult } from './prune/prune.js';
+import type { PruneMode } from './prune/stubs.js';
+import type { ResolvedPruneConfig } from './config/types.js';
 
 export { defineConfig, loadConfig, loadPruneConfig };
 export type {
@@ -49,11 +51,14 @@ export {
   type PruneOptions,
 } from './prune/prune.js';
 export { collectCoverage, type CollectOptions } from './collect/browser.js';
+export { PRUNE_MODES, BEACON_GLOBAL, type PruneMode } from './prune/stubs.js';
 
 export type RunOptions = {
   configPath?: string;
   dryRun?: boolean;
   saveReport?: string;
+  /** Override the config's `pruneMode` (loud stub mode) for this run. */
+  pruneMode?: PruneMode;
 };
 
 export type CollectCliOptions = {
@@ -65,6 +70,8 @@ export type PruneCliOptions = {
   configPath?: string;
   reportPath: string;
   dryRun?: boolean;
+  /** Override the config's `pruneMode` (loud stub mode) for this prune. */
+  pruneMode?: PruneMode;
 };
 
 export type ImportCliOptions = {
@@ -84,6 +91,11 @@ export type MergeCliOptions = {
   rootDir?: string;
 };
 
+/** CLI flag beats config file; the config's own default is 'silent'. */
+function withPruneMode<T extends ResolvedPruneConfig>(config: T, pruneMode?: PruneMode): T {
+  return pruneMode ? { ...config, pruneMode } : config;
+}
+
 /** Collect coverage and prune in one go (the `coverkill run` command). */
 export async function run(options: RunOptions = {}): Promise<void> {
   const config = await loadConfig(options.configPath);
@@ -92,7 +104,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
     onReport: options.saveReport ? (r) => saveReport(r, options.saveReport!) : undefined,
   });
 
-  const pruneResult = await pruneFromReport(report, config, {
+  const pruneResult = await pruneFromReport(report, withPruneMode(config, options.pruneMode), {
     dryRun: options.dryRun,
   });
 
@@ -113,7 +125,7 @@ export async function collect(options: CollectCliOptions = {}): Promise<Coverage
 export async function prune(options: PruneCliOptions): Promise<void> {
   const config = await loadPruneConfig(options.configPath);
   const report = await loadReport(options.reportPath);
-  const result = await pruneFromReport(report, config, {
+  const result = await pruneFromReport(report, withPruneMode(config, options.pruneMode), {
     dryRun: options.dryRun,
   });
   console.log(formatPruneResult(result, Boolean(options.dryRun)));
