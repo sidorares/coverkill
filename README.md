@@ -171,6 +171,12 @@ The test suite includes a differential harness (`test/differential`) that runs
 fixtures under `NODE_V8_COVERAGE`, prunes them with the real pipeline, re-runs
 the pruned output, and asserts observable behavior is unchanged.
 
+Releases are automated with [release-please](https://github.com/googleapis/release-please),
+which derives the version and changelog from
+[Conventional Commits](https://www.conventionalcommits.org) — use `fix:`,
+`feat:`, and `feat!:`/`BREAKING CHANGE:` prefixes. Merging the release PR it
+opens tags the release and publishes to npm.
+
 Run the example app manually:
 
 ```bash
