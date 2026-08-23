@@ -2,7 +2,7 @@ import type { Browser, Page } from 'playwright';
 import type { ResolvedCollectConfig } from '../config/types.js';
 import type { CoverageReport } from '../report/types.js';
 import { buildCoverageReport } from './extract.js';
-import { runScenarios } from './scenarios.js';
+import { loadScenarios } from './scenarios.js';
 import { startWebServer, stopWebServer, type WebServerHandle } from './webServer.js';
 
 export type CollectOptions = {
@@ -41,9 +41,33 @@ export async function collectCoverage(
 
     const context = await browser.newContext({ baseURL: config.baseURL });
     const page = await context.newPage();
-    await startCoverage(page, config);
-    await runScenarios(page, config);
-    const { js, css } = await stopCoverage(page, config);
+    const scenarios = await loadScenarios(config);
+
+    // JS coverage accumulates across navigations (resetOnNavigation false),
+    // but Chrome discards CSS rule usage on every navigation regardless of
+    // settings — the navigated-away page instance comes back as a zero-range
+    // entry. Cycling CSS coverage per scenario captures each scenario's last
+    // page correctly; navigations WITHIN one scenario still lose the earlier
+    // pages' CSS usage, which the resolver detects and skips for safety.
+    await page.coverage.startJSCoverage({
+      resetOnNavigation: config.coverage.js.resetOnNavigation,
+      reportAnonymousScripts: config.coverage.js.reportAnonymousScripts,
+    });
+
+    const css: Awaited<ReturnType<Page['coverage']['stopCSSCoverage']>> = [];
+    for (const { fn } of scenarios) {
+      if (config.coverage.css.enabled) {
+        await page.coverage.startCSSCoverage({
+          resetOnNavigation: config.coverage.css.resetOnNavigation,
+        });
+      }
+      await fn({ page, baseURL: config.baseURL });
+      if (config.coverage.css.enabled) {
+        css.push(...(await page.coverage.stopCSSCoverage()));
+      }
+    }
+
+    const js = await page.coverage.stopJSCoverage();
     const report = buildCoverageReport(config.rootDir, js, css);
 
     if (options.onReport) {

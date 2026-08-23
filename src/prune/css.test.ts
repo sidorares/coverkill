@@ -284,6 +284,192 @@ describe('pruneCss', () => {
     expect(out).not.toContain('.gone');
   });
 
+  // --- @layer declaration order -------------------------------------------
+  // Chrome reports a used named `@layer name { … }` block as ONE range from
+  // the name through the closing brace; an unused named layer block gets no
+  // range at all. Its position still declares the layer order, so a dropped
+  // named block must leave `@layer name;` behind.
+
+  it('replaces a dropped named @layer block with a statement, preserving layer order', () => {
+    const source = [
+      '@layer base {',
+      '  .dead-in-base { color: red; }',
+      '}',
+      '@layer override {',
+      '  .x { color: blue; }',
+      '}',
+      '@layer base {',
+      '  .x { color: green; }',
+      '}',
+      '',
+    ].join('\n');
+    const out = pruneCss(
+      source,
+      rangesOf(source, [
+        'override {\n  .x { color: blue; }\n}',
+        'base {\n  .x { color: green; }\n}',
+      ]),
+    );
+    // Without the statement, the surviving second `@layer base` block would
+    // declare base AFTER override and win the cascade.
+    expect(out).toContain('@layer base;');
+    expect(out.indexOf('@layer base;')).toBeLessThan(out.indexOf('@layer override'));
+    expect(out).toContain('@layer override {\n  .x { color: blue; }\n}');
+    expect(out).toContain('@layer base {\n  .x { color: green; }\n}');
+    expect(out).not.toContain('.dead-in-base');
+  });
+
+  it('drops an unused anonymous @layer block outright, with no statement', () => {
+    const source = [
+      '@layer {',
+      '  .anon-dead { color: red; }',
+      '}',
+      '.used { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.used { color: black; }']));
+    expect(out).not.toContain('@layer');
+    expect(out).not.toContain('.anon-dead');
+    expect(out).toContain('.used { color: black; }');
+  });
+
+  it('emits the @layer statement inside a kept group when a nested named layer is dropped', () => {
+    const source = [
+      '@media (min-width: 1px) {',
+      '  @layer inner {',
+      '    .lm-dead { color: red; }',
+      '  }',
+      '  .lm { color: black; }',
+      '}',
+      '',
+    ].join('\n');
+    const out = pruneCss(
+      source,
+      rangesOf(source, ['(min-width: 1px) ', '.lm { color: black; }']),
+    );
+    expect(out).toBe(
+      [
+        '@media (min-width: 1px) {',
+        '  @layer inner;',
+        '  .lm { color: black; }',
+        '}',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('preserves dotted sub-layer names in the substituted statement', () => {
+    const source = [
+      '@layer theme.dark { .unused-sub { color: red; } }',
+      '@layer theme { .ds { color: black; } }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['theme { .ds { color: black; } }']));
+    expect(out).toContain('@layer theme.dark;');
+    expect(out.indexOf('@layer theme.dark;')).toBeLessThan(out.indexOf('@layer theme {'));
+    expect(out).not.toContain('.unused-sub');
+  });
+
+  // --- inert position-dependent statements --------------------------------
+  // @import is only valid before any other rule, @namespace before any
+  // style/group rule, @charset as the very first bytes. A mid-sheet one was
+  // IGNORED by the browser; keeping it while dropping the rules ahead of it
+  // would promote it into validity and activate it.
+
+  it('drops a mid-sheet @import when the preceding style rule is pruned', () => {
+    const source = [
+      '@import url("early.css");',
+      '.top { color: red; }',
+      '@import url("late.css");',
+      '.bottom { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.bottom { color: black; }']));
+    // Deleting .top must not let late.css start loading.
+    expect(out).toContain('@import url("early.css");');
+    expect(out).not.toContain('late.css');
+    expect(out).not.toContain('.top');
+    expect(out).toContain('.bottom { color: black; }');
+  });
+
+  it('drops a mid-sheet @import even when the preceding style rule is kept', () => {
+    const source = [
+      '@import url("early.css");',
+      '.top { color: red; }',
+      '@import url("late.css");',
+      '.bottom { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(
+      source,
+      rangesOf(source, ['.top { color: red; }', '.bottom { color: black; }']),
+    );
+    expect(out).toContain('@import url("early.css");');
+    expect(out).toContain('.top { color: red; }');
+    // Inert in the original sheet -> dead code in the output too.
+    expect(out).not.toContain('late.css');
+  });
+
+  it('drops a mid-sheet @namespace so pruning cannot activate it', () => {
+    const source = [
+      '@namespace svg url(http://www.w3.org/2000/svg);',
+      '.top { color: red; }',
+      '@namespace url(http://www.w3.org/1999/xhtml);',
+      '.bottom { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.bottom { color: black; }']));
+    // Activating the ignored default namespace would un-match every selector.
+    expect(out).toContain('@namespace svg url(http://www.w3.org/2000/svg);');
+    expect(out).not.toContain('1999/xhtml');
+    expect(out).toContain('.bottom { color: black; }');
+  });
+
+  it('keeps a leading @charset but drops one that appears after a rule', () => {
+    const source = [
+      '@charset "utf-8";',
+      '.used { color: black; }',
+      '@charset "iso-8859-1";',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.used { color: black; }']));
+    expect(out).toContain('@charset "utf-8";');
+    expect(out).not.toContain('iso-8859-1');
+  });
+
+  it('a @layer statement between @imports does not end the import-valid region', () => {
+    const source = [
+      '@import url("a.css");',
+      '@layer base, override;',
+      '@import url("b.css");',
+      '.used { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.used { color: black; }']));
+    // Both imports were valid in the original sheet (per spec @layer
+    // statements may interleave with @import); everything survives.
+    expect(out).toContain('@import url("a.css");');
+    expect(out).toContain('@layer base, override;');
+    expect(out).toContain('@import url("b.css");');
+  });
+
+  it('a @layer BLOCK (unlike a statement) ends the import-valid region', () => {
+    const source = [
+      '@layer base {',
+      '  .dead { color: red; }',
+      '}',
+      '@import url("late.css");',
+      '.used { color: black; }',
+      '',
+    ].join('\n');
+    const out = pruneCss(source, rangesOf(source, ['.used { color: black; }']));
+    // The layer block is a rule, so the import after it was inert; the
+    // dropped block still leaves its order-preserving statement behind.
+    expect(out).toContain('@layer base;');
+    expect(out).not.toContain('late.css');
+    expect(out).not.toContain('.dead');
+  });
+
   it('always keeps @page, @property, @counter-style and @font-feature-values', () => {
     const source = [
       '@page :first { margin: 1in; }',
@@ -419,7 +605,10 @@ describe('pruneCss', () => {
     // Constructs coverage cannot see survive.
     expect(out).toContain('@keyframes spin {');
     expect(out).toContain('@font-face {');
-    expect(out).toContain('@import url("noop.css");');
+    // The trailing @import sits after style rules, so the browser ignored it
+    // (imports are only valid before any other rule). Keeping it would let
+    // pruning promote it into a position where it suddenly loads noop.css.
+    expect(out).not.toContain('@import');
     // Unused content is gone.
     expect(out).not.toContain('.unused');
     expect(out).not.toContain('@media (min-width: 99999px)');

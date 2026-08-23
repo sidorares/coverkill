@@ -3,10 +3,9 @@ import { removeUncoveredRanges, stubReplacement } from './ranges.js';
 
 describe('removeUncoveredRanges', () => {
   it('preserves shebang', () => {
-    const source = '#!/usr/bin/env node\nused();\nunused();\n';
-    const usedStart = source.indexOf('used();');
-    const usedEnd = usedStart + 'used();'.length;
-    const covered = [{ start: usedStart, end: usedEnd }];
+    const source = '#!/usr/bin/env node\nused();\nfunction unused() { x(); }\n';
+    const deadStart = source.indexOf('function unused');
+    const covered = [{ start: 0, end: deadStart }];
     const result = removeUncoveredRanges(source, covered);
     expect(result.startsWith('#!/usr/bin/env node\n')).toBe(true);
     expect(result).toContain('used();');
@@ -14,10 +13,9 @@ describe('removeUncoveredRanges', () => {
   });
 
   it('preserves block license header when enabled', () => {
-    const source = '/*! license */\nused();\nremoved();\n';
-    const usedStart = source.indexOf('used();');
-    const usedEnd = usedStart + 'used();'.length;
-    const covered = [{ start: usedStart, end: usedEnd }];
+    const source = '/*! license */\nused();\nfunction removed() { x(); }\n';
+    const deadStart = source.indexOf('function removed');
+    const covered = [{ start: 0, end: deadStart }];
     const result = removeUncoveredRanges(source, covered, { preserveLicenseHeader: true });
     expect(result.startsWith('/*! license */\n')).toBe(true);
     expect(result).toContain('used();');

@@ -63,7 +63,21 @@ export async function resolvePruneTargets(
     }
 
     if (entry.ranges.length === 0) {
-      skipped.push({ url: entry.url, reason: 'no covered ranges (skipped for safety)' });
+      if (entry.kind === 'css') {
+        // Chrome CSS coverage does not survive navigations: a page instance
+        // navigated away from comes back as a zero-range entry even when its
+        // rules WERE used. For JS a zero-range entry genuinely means nothing
+        // executed, but for CSS it means the usage data was lost — pruning
+        // this file from its other entries would delete rules used on the
+        // zero-range instance's page.
+        poison(
+          filePath,
+          entry.url,
+          'CSS usage for one page instance was lost (Chrome resets CSS coverage on navigation); file skipped for safety',
+        );
+      } else {
+        skipped.push({ url: entry.url, reason: 'no covered ranges (skipped for safety)' });
+      }
       continue;
     }
 

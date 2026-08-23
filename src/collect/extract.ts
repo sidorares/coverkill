@@ -101,10 +101,13 @@ export function extractJsCoverage(entry: JsCoverageEntry): {
     // The whole-script entry ("" spanning everything) is the outermost node of
     // the range tree; flag its root so a dead function whose span happens to
     // be byte-identical (script with no trailing newline) still nests inside.
+    // count > 0 distinguishes the real script root from a dead anonymous
+    // function that happens to span the whole file.
     const isScriptRoot =
       fn.functionName === '' &&
       fn.ranges[0]?.startOffset === 0 &&
-      fn.ranges[0]?.endOffset === maxEnd;
+      fn.ranges[0]?.endOffset === maxEnd &&
+      fn.ranges[0]!.count > 0;
     fn.ranges.forEach((r, i) => {
       if (r.endOffset > r.startOffset) {
         ranges.push({

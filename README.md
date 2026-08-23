@@ -152,6 +152,12 @@ workers, service workers, iframes, or popups is not observed. Files served with
 transforms (dev-server HMR, on-the-fly transpilation) are skipped because the
 executed text does not match the file on disk; run against built output instead.
 
+Chrome discards CSS rule-usage on navigation, so coverkill cycles CSS coverage
+per scenario: navigating between pages in *separate* scenarios works, but a
+stylesheet shared across pages visited *within one* scenario is skipped for
+safety (its earlier pages' usage is unrecoverable). JS coverage accumulates
+across navigations normally.
+
 ## Local development
 
 ```bash

@@ -374,6 +374,153 @@ pick(false, false);
       expect(result.changed).toBe(false);
     },
   },
+  // --- Regression fixtures from the adversarial hunt (round 2) ---
+  {
+    name: 'y: deleting a dead fn after a braceless if must not ASI-join neighbours',
+    source: `
+function f(v) { console.log('f-called'); return v; }
+f(0);
+let x = 1;
+if (x) x = f
+function deadE3() { console.log('DEAD_E3'); }
+(function () { console.log('iife-e3'); })();
+console.log('x-type:' + typeof x);
+let acc = 0;
+for (let i = 0; i < 2; i++) acc = i
+function deadE4() { console.log('DEAD_E4'); }
+[4].forEach(function (v) { console.log('covered', v + acc); });
+`,
+  },
+  {
+    name: 'z: removing a dead else after a braceless consequent must not ASI-join',
+    source: `
+function g(v) { console.log('g-called'); return v; }
+let y = 2;
+if (y) y = 3
+else y = g;
+(function () { console.log('iife2'); })();
+console.log('y:' + y);
+`,
+  },
+  {
+    name: 'aa: dead arrow with parenthesized expression body still lets the file prune',
+    source: `
+const make = (x) => ({ id: x });
+function plainDead1() { console.log('PLAIN_DEAD_1'); }
+console.log('type:' + typeof make);
+`,
+    extra: (result) => {
+      expect(result.changed).toBe(true);
+      expect(result.prunedSource).not.toContain('PLAIN_DEAD_1');
+    },
+  },
+  {
+    name: 'ab: hoist emission skips names shadowing a lexical declaration',
+    source: `
+'use strict';
+function outer(c) {
+  let g = () => 'live';
+  if (c) {
+    function g() { return 'shadow'; }
+    console.log('inner:' + g());
+  }
+  console.log('outer:' + g());
+}
+outer(false);
+function plainDead2() { console.log('PLAIN_DEAD_2'); }
+console.log('done');
+`,
+    extra: (result) => {
+      expect(result.prunedSource).not.toContain('PLAIN_DEAD_2');
+    },
+  },
+  {
+    name: 'ac: statements after a short-circuited await survive V8 misreporting',
+    source: `
+(async () => {
+  const flag = false;
+  const v = flag && (await Promise.resolve('skipped'));
+  console.log('v:' + v);
+  console.log('after-logical');
+  const w = null ?? 'default';
+  console.log('w:' + w);
+})();
+`,
+  },
+  {
+    name: 'ad: do-while loop update after await-ternary is never deleted',
+    source: `
+(async () => {
+  let i = 0;
+  do {
+    const r = i === 0 ? await Promise.resolve('x' + i) : 'plain-' + i;
+    console.log('got:' + r);
+    i += 1;
+  } while (i < 2);
+  console.log('after-do:' + i);
+})();
+`,
+  },
+  {
+    name: 'ae: executed return after await-ternary keeps its value',
+    source: `
+async function pick(mode) {
+  const r = mode ? await Promise.resolve('fast') : await Promise.resolve('slow');
+  return r + '-done';
+}
+pick(true).then((v) => console.log('resolved:' + v));
+`,
+  },
+  {
+    name: 'af: zero-iteration for(let) loop containing a closure must not eat the continuation',
+    source: `
+const handlers = [];
+for (let i = 0; i < 0; i++) {
+  handlers.push(() => i);
+}
+console.log('handlers:' + handlers.length);
+console.log('tail');
+function f() {
+  for (let i = 0; i < 0; i++) { const g = () => i; handlers.push(g); }
+  console.log('f-ran');
+  return 42;
+}
+console.log('ret:' + f());
+`,
+  },
+  {
+    name: 'ag: generator consumed partially keeps its executed resumption behavior',
+    source: `
+function* seq() {
+  console.log('gen-start');
+  yield 1;
+  console.log('gen-middle');
+  yield 2;
+  console.log('gen-tail');
+  yield 3;
+}
+const it = seq();
+console.log('a:' + it.next().value);
+console.log('b:' + it.next().value);
+`,
+  },
+  {
+    name: 'ah: first prune pass reaches the fixed point (no second-run shrink)',
+    source: `
+function used(x) { return x + 1; }
+function orphan(p) { console.log('ORPHAN_BODY', p); }
+function route(p) {
+  if (p === 1) { console.log('one', used(p)); }
+  else { orphan(p); }
+}
+route(1);
+`,
+    extra: (result) => {
+      // orphan's only reference lives in the else branch removed by this same
+      // pass, so the pass itself must already delete the declaration.
+      expect(result.prunedSource).not.toContain('orphan');
+    },
+  },
   {
     name: 'x: CJS script with top-level return is still prunable',
     source: `

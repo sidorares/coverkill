@@ -36,6 +36,27 @@
  * `prelude { kept children }`), and always keep the constructs coverage
  * cannot see. Kept nodes are emitted verbatim from the source. Anything we
  * cannot parse falls back to returning the source unchanged.
+ *
+ * Two cascade-order subtleties (both confirmed against live Chrome):
+ *
+ *  - A used named `@layer name { … }` block is reported as one range from the
+ *    name through the closing brace; an unused one gets no range at all. But a
+ *    named layer block also DECLARES the layer's position in the layer order,
+ *    so dropping it outright reorders the cascade (a later `@layer base {…}`
+ *    re-declaration would then beat `@layer override`). A dropped named layer
+ *    block is therefore replaced with the statement `@layer name;`, which
+ *    preserves the declaration order at near-zero byte cost. Anonymous
+ *    `@layer { … }` blocks have no re-declarable name and are dropped outright.
+ *
+ *  - `@import` is only honored before any other rule (and `@namespace` before
+ *    any style/group rule); `@charset` only as the very first bytes. A
+ *    mid-sheet `@import`/`@namespace` after a style rule is silently IGNORED
+ *    by the browser — but if pruning deletes the rules ahead of it, keeping it
+ *    would promote it into a valid position where it suddenly activates
+ *    (fetching a never-loaded stylesheet, or turning on a default namespace
+ *    that un-matches every kept selector). Such inert statements are dead code
+ *    and are dropped. `@layer name-list;` statements and `@charset` do NOT end
+ *    the import-valid region, but a `@layer { … }` BLOCK does (it is a rule).
  */
 
 import type { ByteRange } from '../report/types.js';
@@ -112,6 +133,16 @@ const LEAF_AT_RULES = new Set([
   'viewport',
 ]);
 
+/**
+ * Statements the browser only honors near the top of the sheet: `@import`
+ * before any other rule, `@namespace` before any style/group rule, `@charset`
+ * as the very first bytes. Once the top-level walk has passed any block-bearing
+ * rule these are inert, and emitting them could promote them into validity
+ * (see the header comment). `@layer name-list;` statements are position-
+ * independent and never filtered.
+ */
+const POSITION_DEPENDENT_STATEMENTS = new Set(['import', 'namespace', 'charset']);
+
 class CssParseError extends Error {}
 
 export function pruneCss(
@@ -170,13 +201,25 @@ export function pruneCss(
     return i === 0 || source[i - 1] === '\n' ? source.slice(i, start) : '';
   };
 
+  /**
+   * Prelude text after the at-keyword, trimmed: for `@layer theme.dark {`
+   * this is `theme.dark`; for anonymous `@layer {` it is the empty string.
+   */
+  const atPreludeAfterKeyword = (node: AtGroupNode): string => {
+    let i = node.start + 1;
+    while (i < node.blockStart && /[A-Za-z0-9_-]/.test(source[i]!)) i++;
+    return source.slice(i, node.blockStart).trim();
+  };
+
   type Emitted = { text: string; verbatim: boolean };
 
   const emitNode = (node: CssNode): Emitted | null => {
     switch (node.type) {
       case 'at-statement':
       case 'at-leaf':
-        // Coverage never reports these; dropping them is never safe.
+        // Coverage never reports these; dropping them is never safe. (Inert
+        // position-dependent statements are filtered by the top-level walk
+        // below before this is reached.)
         return { text: source.slice(node.start, node.end), verbatim: true };
       case 'style':
         if (intersects(node.start, node.end) || isSafelisted(node)) {
@@ -193,6 +236,24 @@ export function pruneCss(
           if (emitted !== null) kept.push({ node: child, emitted });
         }
         if (kept.length === 0) {
+          if (node.name === 'layer') {
+            const layerName = atPreludeAfterKeyword(node);
+            if (layerName === '') {
+              // Anonymous layer: it has no name to re-declare, and an
+              // anonymous layer's order slot dies with its block anyway.
+              return null;
+            }
+            if (!/[\s,/]/.test(layerName)) {
+              // Dropping a named layer block would erase the layer's implicit
+              // position in the layer order; a bare statement re-declares it
+              // in place (this substitution applies at any nesting depth).
+              return { text: `@layer ${layerName};`, verbatim: false };
+            }
+            // Odd prelude (a comment, or a comma list — invalid in block
+            // form): we cannot confidently reduce it to a statement, so keep
+            // the whole block verbatim rather than risk changing the cascade.
+            return { text: source.slice(node.start, node.end), verbatim: true };
+          }
           return null;
         }
         if (
@@ -215,7 +276,18 @@ export function pruneCss(
   };
 
   const pieces: string[] = [];
+  // Tracks whether the ORIGINAL sheet's import-valid region has ended: any
+  // style rule, group at-rule (a @layer BLOCK included) or leaf block at-rule
+  // ends it; statements (@charset, @import, @namespace, @layer name-list;) do
+  // not. A position-dependent statement past that point was ignored by the
+  // browser, so emitting it after pruning could activate it — drop it instead.
+  let importRegionEnded = false;
   for (const node of nodes) {
+    if (node.type !== 'at-statement') {
+      importRegionEnded = true;
+    } else if (importRegionEnded && POSITION_DEPENDENT_STATEMENTS.has(node.name)) {
+      continue;
+    }
     const emitted = emitNode(node);
     if (emitted !== null) pieces.push(indentOf(node.start) + emitted.text);
   }

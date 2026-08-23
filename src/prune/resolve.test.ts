@@ -85,6 +85,36 @@ describe('resolvePruneTargets', () => {
     expect(targets).toEqual([]);
   });
 
+  // Regression: Chrome CSS coverage does not survive navigations, so a page
+  // instance navigated away from yields a zero-range entry even though its
+  // rules were used. That entry must poison the file, not be skipped past.
+  it('skips a CSS file when one instance lost its usage to navigation', async () => {
+    const source = '.page1 { color: red; }\n.page2 { color: blue; }\n';
+    await writeFile(path.join(rootDir, 'shared.css'), source, 'utf8');
+    const { targets, skipped } = await resolvePruneTargets(
+      makeReport([
+        { url: 'http://x/shared.css', source, kind: 'css', ranges: [] },
+        { url: 'http://x/shared.css', source, kind: 'css', ranges: [{ start: 23, end: 46 }] },
+      ]),
+      makeConfig(),
+    );
+    expect(targets).toEqual([]);
+    expect(skipped.some((s) => s.reason.includes('navigation'))).toBe(true);
+  });
+
+  it('still plain-skips a zero-range JS entry without poisoning', async () => {
+    const source = 'console.log("one");\nconsole.log("two");\n';
+    await writeFile(path.join(rootDir, 'zero.js'), source, 'utf8');
+    const { targets } = await resolvePruneTargets(
+      makeReport([
+        { url: 'http://x/zero.js', source, kind: 'js', ranges: [] },
+        { url: 'http://x/zero.js', source, kind: 'js', ranges: [{ start: 0, end: 19 }] },
+      ]),
+      makeConfig(),
+    );
+    expect(targets).toHaveLength(1);
+  });
+
   it('treats an explicit null from sourcePath as skip, not fallback', async () => {
     const source = 'console.log("hi");\n';
     await writeFile(path.join(rootDir, 'mapped.js'), source, 'utf8');

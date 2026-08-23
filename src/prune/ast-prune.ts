@@ -6,7 +6,17 @@ import type { RemoveUncoveredOptions } from './ranges.js';
 
 type UncoveredOp = { start: number; end: number };
 
-type PlannedEdit = { start: number; end: number; text: string };
+type PlannedEdit = {
+  start: number;
+  end: number;
+  text: string;
+  /**
+   * Sub-spans of the original source whose content does not survive this
+   * edit. Identifier references inside them are discounted when deciding
+   * hollow-vs-delete, so one pass reaches the fixed point.
+   */
+  removedSpans?: ByteRange[];
+};
 
 type ParseAttempt = {
   sourceType: 'script' | 'module';
@@ -21,24 +31,28 @@ const PARSE_ATTEMPTS: ParseAttempt[] = [
   { sourceType: 'script', allowReturnOutsideFunction: true },
 ];
 
-function parseAuto(source: string): Program | null {
+type ParseResult = { ast: Program; errors: null } | { ast: null; errors: string[] };
+
+function parseAuto(source: string): ParseResult {
+  const errors: string[] = [];
   for (const attempt of PARSE_ATTEMPTS) {
     try {
-      return acorn.parse(source, {
+      const ast = acorn.parse(source, {
         ecmaVersion: 'latest',
         allowHashBang: true,
         ranges: true,
         ...attempt,
       }) as Program;
-    } catch {
-      // try next mode
+      return { ast, errors: null };
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
     }
   }
-  return null;
+  return { ast: null, errors };
 }
 
 export function isParseableJs(source: string): boolean {
-  return parseAuto(source) !== null;
+  return parseAuto(source).ast !== null;
 }
 
 /** Planning context shared by the recursive edit planner. */
@@ -48,6 +62,10 @@ type PlanContext = {
   ops: UncoveredOp[];
   /** Direct eval defeats static reference analysis: never delete declarations. */
   hasDirectEval: boolean;
+  /** Regions removed by the previous planning iteration (fixed-point pass). */
+  excludedRefSpans: ByteRange[];
+  /** Hoist names proven to collide with lexical declarations (retry pass). */
+  skipHoistNames: Set<string>;
 };
 
 /**
@@ -66,38 +84,88 @@ export function removeUncoveredRangesAst(
   covered: ByteRange[],
   options?: RemoveUncoveredOptions,
 ): string | null {
-  const ast = parseAuto(source);
-  if (ast === null) {
+  const parsed = parseAuto(source);
+  if (parsed.ast === null) {
     debugAst('initial parse failed in script, module, and CJS modes');
     return null;
   }
+  const ast = parsed.ast;
 
   const ops = buildUncoveredOps(source, covered, options);
   if (ops.length === 0) {
     return source;
   }
 
-  const edits = planEdits(ast, ops, source);
-  if (edits.length === 0) {
-    debugAst('no edits planned for %d ops', ops.length);
-    return source;
+  // A hoist-preserving `var x;` can collide with a lexical `x` that legally
+  // shadowed the removed declaration; the re-parse detects it, and the retry
+  // drops that name (matching Annex-B semantics, which skip conflicting
+  // hoists) and plans again.
+  const skipHoistNames = new Set<string>();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const edits = planToFixedPoint(ast, ops, source, skipHoistNames);
+    if (edits.length === 0) {
+      debugAst('no edits planned for %d ops', ops.length);
+      return source;
+    }
+
+    const edited = applyEdits(source, edits);
+    if (edited.length === 0) {
+      debugAst('post-edit result empty');
+      return null;
+    }
+
+    // Re-parse both to validate and to find string/template spans that the
+    // cosmetic whitespace cleanup must not touch.
+    const reparsed = parseAuto(edited);
+    if (reparsed.ast !== null) {
+      return cleanupWhitespace(edited, collectProtectedSpans(reparsed.ast));
+    }
+
+    const collision = findRedeclaredName(reparsed.errors);
+    if (!collision || skipHoistNames.has(collision)) {
+      debugAst('edited output failed to parse: %s', reparsed.errors[0] ?? 'unknown');
+      return null;
+    }
+    skipHoistNames.add(collision);
+  }
+  return null;
+}
+
+function findRedeclaredName(errors: string[]): string | null {
+  for (const message of errors) {
+    const match = message.match(/Identifier '(.+?)' has already been declared/);
+    if (match) return match[1]!;
+  }
+  return null;
+}
+
+/**
+ * Plan edits, then re-plan with references inside removed regions discounted,
+ * until stable: a function kept alive only by references in code deleted in
+ * the same pass would otherwise survive one run and vanish on the next.
+ */
+function planToFixedPoint(
+  ast: Program,
+  ops: UncoveredOp[],
+  source: string,
+  skipHoistNames: Set<string>,
+): PlannedEdit[] {
+  let excluded: ByteRange[] = [];
+  let edits = planEdits(ast, ops, source, excluded, skipHoistNames);
+
+  for (let i = 0; i < 3; i++) {
+    const removed = mergeRanges(edits.flatMap((e) => e.removedSpans ?? []));
+    if (sameRanges(removed, excluded)) break;
+    excluded = removed;
+    edits = planEdits(ast, ops, source, excluded, skipHoistNames);
   }
 
-  const edited = applyEdits(source, edits);
-  if (edited.length === 0) {
-    debugAst('post-edit result empty');
-    return null;
-  }
+  return edits;
+}
 
-  // Re-parse both to validate and to find string/template spans that the
-  // cosmetic whitespace cleanup must not touch.
-  const reparsed = parseAuto(edited);
-  if (reparsed === null) {
-    debugAst('post-edit parse failed');
-    return null;
-  }
-
-  return cleanupWhitespace(edited, collectProtectedSpans(reparsed));
+function sameRanges(a: ByteRange[], b: ByteRange[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((r, i) => r.start === b[i]!.start && r.end === b[i]!.end);
 }
 
 function debugAst(message: string, ...args: Array<string | number>): void {
@@ -155,9 +223,15 @@ function trimOpBounds(source: string, op: UncoveredOp): UncoveredOp {
 // code is left in place (under-pruning is always acceptable).
 // ---------------------------------------------------------------------------
 
-function planEdits(ast: Program, ops: UncoveredOp[], source: string): PlannedEdit[] {
+function planEdits(
+  ast: Program,
+  ops: UncoveredOp[],
+  source: string,
+  excludedRefSpans: ByteRange[],
+  skipHoistNames: Set<string>,
+): PlannedEdit[] {
   const { refs, hasDirectEval } = buildReferenceIndex(ast);
-  const ctx: PlanContext = { source, refs, ops, hasDirectEval };
+  const ctx: PlanContext = { source, refs, ops, hasDirectEval, excludedRefSpans, skipHoistNames };
   const edits: PlannedEdit[] = [];
 
   for (const op of ops) {
@@ -292,7 +366,7 @@ function overlapsAnyOp(node: Node, ops: UncoveredOp[]): boolean {
  * inside `node` that hoist to the enclosing function scope. Traversal stops
  * at nested function/class boundaries, whose bindings do not escape.
  */
-function collectHoistedNames(node: Node): string[] {
+function collectHoistedNames(node: Node, skipNames?: Set<string>): string[] {
   const names = new Set<string>();
 
   function visit(current: Node, isRoot: boolean): void {
@@ -328,7 +402,7 @@ function collectHoistedNames(node: Node): string[] {
   }
 
   visit(node, true);
-  return [...names];
+  return [...names].filter((n) => !skipNames?.has(n));
 }
 
 function collectPatternNames(pattern: Node, into: Set<string>): void {
@@ -372,30 +446,87 @@ function visitStatementList(
   ctx: PlanContext,
   edits: PlannedEdit[],
 ): void {
+  // V8 block coverage misattributes executed continuations as count-0 in a
+  // family of shapes (resumption after conditionally-skipped await/yield,
+  // zero-iteration for(let..) loops containing closures, and more). Function
+  // declarations are exempt — their deadness is backed by their own V8
+  // function entries — but any other statement is only deleted when control
+  // flow provably could not reach it: the previous kept sibling must end in
+  // return/throw/break/continue and contain no suspension point.
+  let terminatorJustified = false;
+
   for (let i = 0; i < statements.length; i++) {
     const stmt = statements[i]!;
-    if (!overlaps(stmt, op)) continue;
+    if (!overlaps(stmt, op) && !overlapsAnyOp(stmt, ctx.ops)) {
+      terminatorJustified = endsWithTerminator(stmt) && !containsSuspension(stmt);
+      continue;
+    }
+    if (!overlaps(stmt, op)) {
+      // Touched by a different op; that op's own pass handles it. Its
+      // execution state is mixed, so it cannot justify deletions after it.
+      terminatorJustified = false;
+      continue;
+    }
     if (whollyInside(stmt, op)) {
-      // V8 (observed on Node 26 / Chromium) misreports the continuation after
-      // an await-bearing ternary as count-0 even though it executed. Leave
-      // such statements alone rather than trusting the misreport.
-      const prev = i > 0 ? statements[i - 1] : null;
-      if (prev && !overlaps(prev, op) && containsSuspendingTernary(prev)) {
+      const trusted = isEntryBackedStatement(stmt) || stmt.type === 'EmptyStatement';
+      if (!trusted && !terminatorJustified) {
         continue;
       }
       const edit = replaceStatement(stmt, ctx, { list: statements, index: i });
       if (edit) edits.push(edit);
     } else {
       visitPartial(stmt, op, ctx, edits);
+      terminatorJustified = false;
     }
   }
 }
 
-/** True when the statement contains a ternary with await/yield at its own function level. */
-function containsSuspendingTernary(node: Node): boolean {
+/** Statements whose removal is justified by a dedicated V8 function entry. */
+function isEntryBackedStatement(stmt: Node): boolean {
+  if (stmt.type === 'FunctionDeclaration') return true;
+  if (stmt.type === 'ExportNamedDeclaration' || stmt.type === 'ExportDefaultDeclaration') {
+    const decl = (stmt as acorn.ExportNamedDeclaration | acorn.ExportDefaultDeclaration)
+      .declaration as Node | null | undefined;
+    return (
+      decl?.type === 'FunctionDeclaration' ||
+      decl?.type === 'FunctionExpression' ||
+      decl?.type === 'ArrowFunctionExpression'
+    );
+  }
+  return false;
+}
+
+/** True when the statement's final control flow leaves the enclosing list. */
+function endsWithTerminator(stmt: Node): boolean {
+  switch (stmt.type) {
+    case 'ReturnStatement':
+    case 'ThrowStatement':
+    case 'BreakStatement':
+    case 'ContinueStatement':
+      return true;
+    case 'IfStatement': {
+      const n = stmt as acorn.IfStatement;
+      return (
+        endsWithTerminator(n.consequent) ||
+        (n.alternate !== null && n.alternate !== undefined && endsWithTerminator(n.alternate))
+      );
+    }
+    case 'BlockStatement': {
+      const body = (stmt as acorn.BlockStatement).body;
+      return body.length > 0 && endsWithTerminator(body[body.length - 1]!);
+    }
+    case 'LabeledStatement':
+      return endsWithTerminator((stmt as acorn.LabeledStatement).body);
+    default:
+      return false;
+  }
+}
+
+/** Any await/yield at the statement's own function level (misreport risk). */
+function containsSuspension(node: Node): boolean {
   let found = false;
 
-  function visit(current: Node, insideConditional: boolean): void {
+  function visit(current: Node): void {
     if (found) return;
     switch (current.type) {
       case 'FunctionDeclaration':
@@ -404,17 +535,14 @@ function containsSuspendingTernary(node: Node): boolean {
         return;
       case 'AwaitExpression':
       case 'YieldExpression':
-        if (insideConditional) found = true;
-        return;
-      case 'ConditionalExpression':
-        forEachChild(current, (child) => visit(child, true));
+        found = true;
         return;
       default:
-        forEachChild(current, (child) => visit(child, insideConditional));
+        forEachChild(current, visit);
     }
   }
 
-  visit(node, false);
+  visit(node);
   return found;
 }
 
@@ -432,21 +560,43 @@ function deletionText(ctx: PlanContext, position: ListPosition | null): string {
   if (index === 0) return '';
   const prev = list[index - 1]!;
   if (overlapsAnyOp(prev, ctx.ops)) return ';';
-  if (ctx.source[prev.end - 1] === ';') return '';
-  switch (prev.type) {
+  return isTerminatedStatement(prev, ctx.source) ? '' : ';';
+}
+
+/**
+ * A statement is safely terminated when its final token is an explicit `;`
+ * or the closing `}` of a structural statement. A braceless `if (x) x = f`
+ * ends mid-expression regardless of its type, and an ExpressionStatement can
+ * end in `}` (object literal, function expression) while still being open to
+ * ASI joins — both need a `;` placeholder after deletions.
+ */
+function isTerminatedStatement(stmt: Node, source: string): boolean {
+  const last = source[stmt.end - 1];
+  if (last === ';') return true;
+  if (last !== '}') return false;
+  switch (stmt.type) {
     case 'BlockStatement':
     case 'IfStatement':
     case 'ForStatement':
     case 'ForInStatement':
     case 'ForOfStatement':
     case 'WhileStatement':
+    case 'DoWhileStatement':
     case 'SwitchStatement':
     case 'TryStatement':
     case 'FunctionDeclaration':
     case 'ClassDeclaration':
-      return '';
+    case 'LabeledStatement':
+    case 'WithStatement':
+      return true;
+    case 'ExportNamedDeclaration':
+    case 'ExportDefaultDeclaration': {
+      const decl = (stmt as acorn.ExportNamedDeclaration | acorn.ExportDefaultDeclaration)
+        .declaration as Node | null | undefined;
+      return decl?.type === 'FunctionDeclaration' || decl?.type === 'ClassDeclaration';
+    }
     default:
-      return ';';
+      return false;
   }
 }
 
@@ -456,7 +606,7 @@ function replaceStatement(
   ctx: PlanContext,
   position: ListPosition | null,
 ): PlannedEdit | null {
-  const { source, refs } = ctx;
+  const { source } = ctx;
   switch (stmt.type) {
     case 'FunctionDeclaration': {
       const fn = stmt as acorn.FunctionDeclaration;
@@ -464,21 +614,32 @@ function replaceStatement(
       // references would turn that reference into a ReferenceError, so
       // referenced functions are hollowed instead of deleted. Direct eval
       // can reference anything, so it disables deletion entirely.
-      if (fn.id && (ctx.hasDirectEval || isReferencedOutside(refs, fn.id.name, stmt))) {
+      if (fn.id && (ctx.hasDirectEval || isReferencedOutside(ctx, fn.id.name, stmt))) {
         return hollowFunctionBody(fn, source);
       }
-      return { start: stmt.start, end: stmt.end, text: deletionText(ctx, position) };
+      return {
+        start: stmt.start,
+        end: stmt.end,
+        text: deletionText(ctx, position),
+        removedSpans: [{ start: stmt.start, end: stmt.end }],
+      };
     }
     case 'ClassDeclaration': {
       const cls = stmt as acorn.ClassDeclaration;
-      if (cls.id && (ctx.hasDirectEval || isReferencedOutside(refs, cls.id.name, stmt))) {
+      if (cls.id && (ctx.hasDirectEval || isReferencedOutside(ctx, cls.id.name, stmt))) {
         return {
           start: stmt.start,
           end: stmt.end,
           text: `${source.slice(stmt.start, cls.body.start)}{}`,
+          removedSpans: [{ start: cls.body.start, end: cls.body.end }],
         };
       }
-      return { start: stmt.start, end: stmt.end, text: deletionText(ctx, position) };
+      return {
+        start: stmt.start,
+        end: stmt.end,
+        text: deletionText(ctx, position),
+        removedSpans: [{ start: stmt.start, end: stmt.end }],
+      };
     }
     case 'VariableDeclaration':
       return replaceVariableDeclaration(stmt as acorn.VariableDeclaration, source);
@@ -493,11 +654,12 @@ function replaceStatement(
     case 'EmptyStatement':
       return { start: stmt.start, end: stmt.end, text: '' };
     default: {
-      const hoisted = hoistedVarText(collectHoistedNames(stmt));
+      const removedSpans = [{ start: stmt.start, end: stmt.end }];
+      const hoisted = hoistedVarText(collectHoistedNames(stmt, ctx.skipHoistNames));
       if (hoisted) {
-        return { start: stmt.start, end: stmt.end, text: hoisted };
+        return { start: stmt.start, end: stmt.end, text: hoisted, removedSpans };
       }
-      return { start: stmt.start, end: stmt.end, text: deletionText(ctx, position) };
+      return { start: stmt.start, end: stmt.end, text: deletionText(ctx, position), removedSpans };
     }
   }
 }
@@ -525,6 +687,7 @@ function hollowDeclaration(decl: Node, ctx: PlanContext): PlannedEdit | null {
       start: decl.start,
       end: decl.end,
       text: `${source.slice(decl.start, cls.body.start)}{}`,
+      removedSpans: [{ start: cls.body.start, end: cls.body.end }],
     };
   }
   if (decl.type === 'VariableDeclaration') {
@@ -541,11 +704,16 @@ function hollowFunctionBody(
   source: string,
 ): PlannedEdit {
   const body = fn.body;
-  const text =
-    body.type === 'BlockStatement'
-      ? `${source.slice(fn.start, body.start)}{}`
-      : `${source.slice(fn.start, body.start)}void 0`;
-  return { start: fn.start, end: fn.end, text };
+  // Preserve the bytes after the body too: a parenthesized arrow expression
+  // body ((x) => ({...})) keeps its closing paren outside body.end.
+  const replacement = body.type === 'BlockStatement' ? '{}' : 'void 0';
+  const text = `${source.slice(fn.start, body.start)}${replacement}${source.slice(body.end, fn.end)}`;
+  return {
+    start: fn.start,
+    end: fn.end,
+    text,
+    removedSpans: [{ start: body.start, end: body.end }],
+  };
 }
 
 function replaceVariableDeclaration(
@@ -570,7 +738,14 @@ function replaceVariableDeclaration(
     // No byte savings — leave the original in place.
     return null;
   }
-  return { start: decl.start, end: decl.end, text };
+  return {
+    start: decl.start,
+    end: decl.end,
+    text,
+    removedSpans: decl.declarations
+      .filter((d) => d.init)
+      .map((d) => ({ start: d.init!.start, end: d.init!.end })),
+  };
 }
 
 function replaceSwitchCase(node: acorn.SwitchCase, ctx: PlanContext): PlannedEdit | null {
@@ -581,24 +756,31 @@ function replaceSwitchCase(node: acorn.SwitchCase, ctx: PlanContext): PlannedEdi
   const label = ctx.source.slice(node.start, labelEnd).trimEnd();
   const hoisted = new Set<string>();
   for (const stmt of node.consequent) {
-    for (const name of collectHoistedNames(stmt)) hoisted.add(name);
+    for (const name of collectHoistedNames(stmt, ctx.skipHoistNames)) hoisted.add(name);
     if (stmt.type === 'FunctionDeclaration') {
       const id = (stmt as acorn.FunctionDeclaration).id;
-      if (id) hoisted.add(id.name);
+      if (id && !ctx.skipHoistNames.has(id.name)) hoisted.add(id.name);
     }
   }
   const vars = hoisted.size > 0 ? ` var ${[...hoisted].join(', ')};` : '';
-  return { start: node.start, end: node.end, text: `${label}${vars} break;` };
+  return {
+    start: node.start,
+    end: node.end,
+    text: `${label}${vars} break;`,
+    removedSpans: [{ start: labelEnd, end: node.end }],
+  };
 }
 
-function isReferencedOutside(
-  refs: Map<string, ByteRange[]>,
-  name: string,
-  node: Node,
-): boolean {
-  const spans = refs.get(name);
+function isReferencedOutside(ctx: PlanContext, name: string, node: Node): boolean {
+  const spans = ctx.refs.get(name);
   if (!spans) return false;
-  return spans.some((span) => span.start < node.start || span.end > node.end);
+  return spans.some(
+    (span) =>
+      (span.start < node.start || span.end > node.end) &&
+      // References inside regions removed by this same pass do not keep a
+      // declaration alive (otherwise a second run would prune further).
+      !ctx.excludedRefSpans.some((ex) => span.start >= ex.start && span.end <= ex.end),
+  );
 }
 
 /**
@@ -616,10 +798,15 @@ function replaceEmbeddedStatement(stmt: Node, ctx: PlanContext): PlannedEdit | n
     return hollowFunctionBody(stmt as acorn.FunctionDeclaration, ctx.source);
   }
   if (stmt.type === 'EmptyStatement') return null;
-  const hoisted = collectHoistedNames(stmt);
+  const hoisted = collectHoistedNames(stmt, ctx.skipHoistNames);
   const inner = hoistedVarText(hoisted);
   const text = stmt.type === 'BlockStatement' || inner ? `{${inner ? ` ${inner} ` : ''}}` : ';';
-  return { start: stmt.start, end: stmt.end, text };
+  return {
+    start: stmt.start,
+    end: stmt.end,
+    text,
+    removedSpans: [{ start: stmt.start, end: stmt.end }],
+  };
 }
 
 /**
@@ -780,6 +967,7 @@ function visitPartial(
             start: body.start,
             end: body.end,
             text: body.type === 'BlockStatement' ? '{}' : 'void 0',
+            removedSpans: [{ start: body.start, end: body.end }],
           });
         } else {
           visitPartial(value, op, ctx, edits);
@@ -803,11 +991,15 @@ function visitPartial(
               start: child.start,
               end: child.end,
               text: `${source.slice(child.start, cls.body.start)}{}`,
+              removedSpans: [{ start: cls.body.start, end: cls.body.end }],
             });
-          } else if (isStatementNode(child)) {
+          } else if (isEntryBackedStatement(child)) {
+            // Only function-backed statements carry their own V8 evidence;
+            // other statements here lack sibling context for the terminator
+            // justification and are left in place.
             const edit = replaceStatement(child, ctx, null);
             if (edit) edits.push(edit);
-          } else {
+          } else if (!isStatementNode(child)) {
             visitPartial(child, op, ctx, edits);
           }
           // Other expression kinds wholly inside an uncovered range are left
@@ -835,9 +1027,15 @@ function expressionEdit(node: Node, source: string): PlannedEdit {
       start: node.start,
       end: node.end,
       text: `${source.slice(node.start, cls.body.start)}{}`,
+      removedSpans: [{ start: cls.body.start, end: cls.body.end }],
     };
   }
-  return { start: node.start, end: node.end, text: '0' };
+  return {
+    start: node.start,
+    end: node.end,
+    text: '0',
+    removedSpans: [{ start: node.start, end: node.end }],
+  };
 }
 
 /**
@@ -857,19 +1055,26 @@ function removeElseBranch(
   const match = findElseKeyword(gap);
   if (match === null) return null;
   const start = ifNode.consequent.end + match;
+  const removedSpans = [{ start: alternate.start, end: alternate.end }];
 
-  const hoisted = new Set<string>(collectHoistedNames(alternate));
+  const hoisted = collectHoistedNames(alternate, ctx.skipHoistNames);
   if (alternate.type === 'FunctionDeclaration') {
     // Sloppy-mode `else function g() {}` hoists a var-like binding too.
     const id = (alternate as acorn.FunctionDeclaration).id;
-    if (id) hoisted.add(id.name);
+    if (id && !ctx.skipHoistNames.has(id.name) && !hoisted.includes(id.name)) {
+      hoisted.push(id.name);
+    }
   }
 
-  if (hoisted.size === 0 && !elseHazard) {
-    return { start, end: alternate.end, text: '' };
+  if (hoisted.length === 0 && !elseHazard) {
+    // The alternate's own terminator is consumed by the deletion; a braceless
+    // unterminated consequent (`if (y) y = 3`) would otherwise ASI-join the
+    // next statement.
+    const text = isTerminatedStatement(ifNode.consequent, source) ? '' : ';';
+    return { start, end: alternate.end, text, removedSpans };
   }
-  const inner = hoisted.size > 0 ? ` var ${[...hoisted].join(', ')}; ` : '';
-  return { start, end: alternate.end, text: `else {${inner}}` };
+  const inner = hoisted.length > 0 ? ` var ${hoisted.join(', ')}; ` : '';
+  return { start, end: alternate.end, text: `else {${inner}}`, removedSpans };
 }
 
 /**
