@@ -200,6 +200,35 @@ describe('extractJsCoverage', () => {
     expect(stub).toEqual([]);
   });
 
+  it('lets a dead function whose span equals the whole-script range stay uncovered', () => {
+    // A script with no trailing newline whose only content is a dead function:
+    // the "" whole-script count-1 range and the function's count-0 root are
+    // byte-identical. The script root must sort outermost so the dead
+    // function still nests inside it and its bytes stay uncovered.
+    const source = "function dead(){ console.log('never'); }";
+    const entry = {
+      url: 'http://localhost/app.js',
+      scriptId: '1',
+      source,
+      functions: [
+        {
+          functionName: '',
+          isBlockCoverage: true,
+          ranges: [{ startOffset: 0, endOffset: source.length, count: 1 }],
+        },
+        {
+          functionName: 'dead',
+          isBlockCoverage: false,
+          ranges: [{ startOffset: 0, endOffset: source.length, count: 0 }],
+        },
+      ],
+    };
+
+    const { covered, stub } = extractJsCoverage(entry);
+    expect(covered).toEqual([]);
+    expect(stub).toEqual([]);
+  });
+
   it('handles an empty functions array and ignores zero-length ranges', () => {
     expect(
       extractJsCoverage({ url: 'http://localhost/app.js', source: 'const a = 1;', functions: [] }),

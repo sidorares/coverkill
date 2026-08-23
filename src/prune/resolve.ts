@@ -25,14 +25,35 @@ export async function resolvePruneTargets(
   config: ResolvedPruneConfig,
 ): Promise<ResolveResult> {
   const { isIncluded } = createMatchers(config.rootDir, config.include, config.exclude);
-  const targets: ResolvedPruneTarget[] = [];
+  let targets: ResolvedPruneTarget[] = [];
   const skipped: ResolveResult['skipped'] = [];
   const byPath = new Map<string, ResolvedPruneTarget>();
+  const poisoned = new Set<string>();
+
+  // A file is only prunable when EVERY coverage entry mapping to it could be
+  // merged: pruning from a subset of entries would delete code that executed
+  // during the dropped entry's run. Poisoning removes the file entirely.
+  const poison = (filePath: string, url: string, reason: string) => {
+    skipped.push({ url, reason });
+    poisoned.add(filePath);
+    if (byPath.has(filePath)) {
+      byPath.delete(filePath);
+      targets = targets.filter((t) => t.filePath !== filePath);
+    }
+  };
 
   for (const entry of report.entries) {
     const filePath = resolveFilePath(entry.url, config);
     if (!filePath) {
       skipped.push({ url: entry.url, reason: 'no sourcePath mapping' });
+      continue;
+    }
+
+    if (poisoned.has(filePath)) {
+      skipped.push({
+        url: entry.url,
+        reason: `another coverage entry for ${filePath} could not be used; file skipped for safety`,
+      });
       continue;
     }
 
@@ -50,10 +71,11 @@ export async function resolvePruneTargets(
     // Without it we cannot verify the disk file is in the same coordinate
     // space, so pruning would be a blind byte-slice of the wrong text.
     if (!entry.source) {
-      skipped.push({
-        url: entry.url,
-        reason: 'report entry has no embedded source text (skipped for safety)',
-      });
+      poison(
+        filePath,
+        entry.url,
+        'report entry has no embedded source text (file skipped for safety)',
+      );
       continue;
     }
 
@@ -66,10 +88,11 @@ export async function resolvePruneTargets(
     }
 
     if (!contentMatchesDisk(entry.source, diskSource)) {
-      skipped.push({
-        url: entry.url,
-        reason: `on-disk content does not match coverage source for ${filePath}`,
-      });
+      poison(
+        filePath,
+        entry.url,
+        `on-disk content does not match coverage source for ${filePath}; file skipped`,
+      );
       continue;
     }
 
@@ -79,13 +102,14 @@ export async function resolvePruneTargets(
     const existing = byPath.get(filePath);
     if (existing) {
       // Ranges are offsets into the script text; entries whose text differs
-      // (e.g. two inline scripts sharing a page URL) are in different
-      // coordinate spaces and must not be merged.
-      if (existing.source !== source) {
-        skipped.push({
-          url: entry.url,
-          reason: `coverage entries for ${filePath} have different source text; cannot merge ranges`,
-        });
+      // (e.g. two inline scripts sharing a page URL, or line-ending drift
+      // between navigations) are in different coordinate spaces.
+      if (existing.source !== source || existing.kind !== entry.kind) {
+        poison(
+          filePath,
+          entry.url,
+          `coverage entries for ${filePath} disagree on source text or kind; file skipped`,
+        );
         continue;
       }
       existing.ranges = mergeEntryRanges(existing.ranges, entry.ranges);

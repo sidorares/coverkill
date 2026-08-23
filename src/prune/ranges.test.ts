@@ -52,6 +52,54 @@ describe('CSS pruning', () => {
     expect(result).toContain('.used');
     expect(result).not.toContain('.unused');
   });
+
+  // Regression: escaped braces in selectors are legal (utility-class
+  // frameworks emit them) and must not confuse rule-boundary scanning.
+  it('handles escaped braces in selectors without corrupting neighbours', () => {
+    const source = [
+      '.a\\{x { color: rgb(1, 1, 1); }',
+      '.mid { color: rgb(2, 2, 2); }',
+      '.b\\}y { color: rgb(3, 3, 3); }',
+      '.tail { color: rgb(4, 4, 4); }',
+      '',
+    ].join('\n');
+    const mid = '.mid { color: rgb(2, 2, 2); }';
+    const tail = '.tail { color: rgb(4, 4, 4); }';
+    const covered = [
+      { start: source.indexOf(mid), end: source.indexOf(mid) + mid.length },
+      { start: source.indexOf(tail), end: source.indexOf(tail) + tail.length },
+    ];
+    const result = removeUncoveredRanges(source, covered, { kind: 'css' });
+    expect(result).toContain(mid);
+    expect(result).toContain(tail);
+    // The kept tail rule must not be glued onto a dangling selector fragment.
+    expect(result).not.toMatch(/\\}\s*\n\.tail/);
+    expect(result).not.toContain('rgb(1, 1, 1)');
+    expect(result).not.toContain('rgb(3, 3, 3)');
+  });
+
+  // Regression: @charset must be the first bytes of a sheet, so a license
+  // banner can only follow it — preserveLicenseHeader must keep it there.
+  it('preserves a license banner that follows @charset', () => {
+    const source = [
+      '@charset "utf-8";',
+      '/*! Copyright ACME 2026 - MIT */',
+      '.used-a { color: rgb(1, 1, 1); }',
+      '.unused-b { color: rgb(2, 2, 2); }',
+      '',
+    ].join('\n');
+    const used = '.used-a { color: rgb(1, 1, 1); }';
+    const covered = [{ start: source.indexOf(used), end: source.indexOf(used) + used.length }];
+    const result = removeUncoveredRanges(source, covered, {
+      kind: 'css',
+      preserveLicenseHeader: true,
+    });
+    expect(result).toContain('@charset "utf-8";');
+    expect(result).toContain('/*! Copyright ACME 2026 - MIT */');
+    expect(result).toContain('.used-a');
+    expect(result).not.toContain('.unused-b');
+    expect(result.indexOf('@charset')).toBeLessThan(result.indexOf('/*!'));
+  });
 });
 
 describe('stubReplacement (legacy byte path)', () => {

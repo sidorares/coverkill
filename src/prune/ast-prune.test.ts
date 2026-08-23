@@ -249,6 +249,34 @@ describe('AST pruning', () => {
     expectValidJs(result);
   });
 
+  // Regression: V8 ranges for `export function f` start at the `function`
+  // keyword; the export statement must never be orphaned or deleted.
+  it('hollows a dead exported function instead of orphaning the export keyword', () => {
+    const source = [
+      'export function used() { return 1; }',
+      'export function dead() { heavy(); }',
+      'used();',
+    ].join('\n');
+    const hole = spanOf(source, 'function dead() { heavy(); }');
+    const result = removeUncoveredRanges(source, coveredExcept(source, [hole]));
+    expect(result).toContain('export function dead() {}');
+    expect(result).not.toContain('heavy');
+    expectValidJs(result);
+  });
+
+  it('hollows a dead export default function without absorbing the next statement', () => {
+    const source = [
+      'export default function main() { heavy(); }',
+      "console.log('after');",
+    ].join('\n');
+    const hole = spanOf(source, 'function main() { heavy(); }');
+    const result = removeUncoveredRanges(source, coveredExcept(source, [hole]));
+    expect(result).toContain('export default function main() {}');
+    expect(result).toContain("console.log('after');");
+    expect(result).not.toContain('heavy');
+    expectValidJs(result);
+  });
+
   it('leaves comment-separated else branches intact when deletion is ambiguous', () => {
     const source = 'function f(x){if(x){a();}else /* note */ {b();}}\nf(1);';
     const hole = spanOf(source, 'else /* note */ {b();}');

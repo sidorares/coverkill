@@ -63,7 +63,7 @@ export function buildCoverageReport(
   };
 }
 
-type Segment = { start: number; end: number; count: number };
+type Segment = { start: number; end: number; count: number; isScriptRoot?: boolean };
 
 type FnSpan = { start: number; end: number; executed: boolean };
 
@@ -89,13 +89,32 @@ export function extractJsCoverage(entry: JsCoverageEntry): {
   covered: ByteRange[];
   stub: ByteRange[];
 } {
-  const ranges: Segment[] = [];
+  let maxEnd = 0;
   for (const fn of entry.functions) {
     for (const r of fn.ranges) {
-      if (r.endOffset > r.startOffset) {
-        ranges.push({ start: r.startOffset, end: r.endOffset, count: r.count });
-      }
+      if (r.endOffset > maxEnd) maxEnd = r.endOffset;
     }
+  }
+
+  const ranges: Segment[] = [];
+  for (const fn of entry.functions) {
+    // The whole-script entry ("" spanning everything) is the outermost node of
+    // the range tree; flag its root so a dead function whose span happens to
+    // be byte-identical (script with no trailing newline) still nests inside.
+    const isScriptRoot =
+      fn.functionName === '' &&
+      fn.ranges[0]?.startOffset === 0 &&
+      fn.ranges[0]?.endOffset === maxEnd;
+    fn.ranges.forEach((r, i) => {
+      if (r.endOffset > r.startOffset) {
+        ranges.push({
+          start: r.startOffset,
+          end: r.endOffset,
+          count: r.count,
+          isScriptRoot: isScriptRoot && i === 0,
+        });
+      }
+    });
   }
   if (ranges.length === 0) return { covered: [], stub: [] };
 
@@ -125,7 +144,11 @@ export function extractJsCoverage(entry: JsCoverageEntry): {
  */
 function flattenRanges(ranges: Segment[]): Segment[] {
   const sorted = [...ranges].sort(
-    (a, b) => a.start - b.start || b.end - a.end || a.count - b.count,
+    (a, b) =>
+      a.start - b.start ||
+      b.end - a.end ||
+      Number(b.isScriptRoot ?? false) - Number(a.isScriptRoot ?? false) ||
+      a.count - b.count,
   );
 
   const segments: Segment[] = [];

@@ -382,6 +382,12 @@ function scanPrelude(
   let depth = 0;
   while (pos < end) {
     const ch = source[pos]!;
+    if (ch === '\\') {
+      // Selector escapes (`.a\{x`, `.b\}y`, `\"`) are single tokens: the
+      // escaped character must never be read as structure.
+      pos += 2;
+      continue;
+    }
     if (ch === '/' && source[pos + 1] === '*') {
       const close = source.indexOf('*/', pos + 2);
       if (close === -1 || close + 2 > end) {
@@ -426,6 +432,10 @@ function scanBlock(source: string, pos: number, end: number): number {
   let depth = 0;
   while (pos < end) {
     const ch = source[pos]!;
+    if (ch === '\\') {
+      pos += 2;
+      continue;
+    }
     if (ch === '/' && source[pos + 1] === '*') {
       const close = source.indexOf('*/', pos + 2);
       if (close === -1 || close + 2 > end) {

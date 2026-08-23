@@ -26,11 +26,7 @@ export function removeUncoveredRanges(
   if (kind === 'css') {
     const pruned = pruneCss(source, mergeRanges(covered), { safelist: options?.cssSafelist });
     if (options?.preserveLicenseHeader && pruned !== source) {
-      const licenseEnd = detectLicenseHeaderEnd(source, 0);
-      const header = source.slice(0, licenseEnd);
-      if (licenseEnd > 0 && !pruned.startsWith(header)) {
-        return header + pruned;
-      }
+      return reattachCssLicenseHeader(source, pruned);
     }
     return pruned;
   }
@@ -124,6 +120,26 @@ export function stubReplacement(source: string, start: number, end: number): str
     return '{}';
   }
   return '0';
+}
+
+/**
+ * pruneCss drops standalone comments, so a leading license banner must be
+ * re-attached. Per spec @charset must be the very first bytes of a sheet,
+ * making "@charset, then the banner" the only other valid layout.
+ */
+function reattachCssLicenseHeader(source: string, pruned: string): string {
+  const charset = source.match(/^@charset\s+"[^"]*";\r?\n?/);
+  const headerStart = charset ? charset[0].length : 0;
+  const headerEnd = detectLicenseHeaderEnd(source, headerStart);
+  if (headerEnd <= headerStart) return pruned;
+  const header = source.slice(headerStart, headerEnd);
+  if (pruned.includes(header.trim())) return pruned;
+
+  if (charset && pruned.startsWith(charset[0].trimEnd())) {
+    const insertAt = pruned.startsWith(charset[0]) ? charset[0].length : charset[0].trimEnd().length;
+    return `${pruned.slice(0, insertAt)}\n${header}${pruned.slice(insertAt)}`;
+  }
+  return header + pruned;
 }
 
 function detectLicenseHeaderEnd(source: string, fromOffset: number): number {
