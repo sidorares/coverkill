@@ -277,6 +277,49 @@ describe('AST pruning', () => {
     expectValidJs(result);
   });
 
+  // Regression: in classic scripts, top-level declarations are globalThis
+  // properties; covered member reflection must keep the name alive.
+  it('hollows a dead function reflected via a member property name', () => {
+    const source = [
+      'function deadReflected() { heavy(); }',
+      "console.log(typeof window.deadReflected);",
+    ].join('\n');
+    const hole = spanOf(source, 'function deadReflected() { heavy(); }');
+    const result = removeUncoveredRanges(source, coveredExcept(source, [hole]));
+    expect(result).toContain('function deadReflected() {}');
+    expect(result).not.toContain('heavy');
+    expectValidJs(result);
+  });
+
+  // Regression: prune time must stay near-linear on large minified files.
+  it('prunes a large single-line minified file quickly and correctly', () => {
+    const parts: string[] = ['let out=0;'];
+    for (let i = 0; i < 300; i++) {
+      parts.push(
+        `function dead${i}(x){return x*${i}+dead${i}chain(x)}`,
+        `function dead${i}chain(x){return x-${i}}`,
+        `function used${i}(x){return x+${i}}`,
+        `out+=used${i}(${i});`,
+      );
+    }
+    parts.push("console.log('out:'+out);");
+    const source = parts.join('');
+    // Realistic shape: everything covered except the dead functions.
+    const holes: ByteRange[] = [];
+    for (let i = 0; i < 300; i++) {
+      holes.push(spanOf(source, `function dead${i}(x){return x*${i}+dead${i}chain(x)}`));
+      holes.push(spanOf(source, `function dead${i}chain(x){return x-${i}}`));
+    }
+    const started = Date.now();
+    const result = removeUncoveredRanges(source, coveredExcept(source, holes));
+    const elapsed = Date.now() - started;
+    expect(result).not.toContain('dead0chain');
+    expect(result).not.toContain('dead299(');
+    expect(result).toContain('used299');
+    expect(elapsed).toBeLessThan(10_000);
+    expectValidJs(result);
+  });
+
   it('leaves comment-separated else branches intact when deletion is ambiguous', () => {
     const source = 'function f(x){if(x){a();}else /* note */ {b();}}\nf(1);';
     const hole = spanOf(source, 'else /* note */ {b();}');

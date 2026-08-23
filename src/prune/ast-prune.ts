@@ -31,10 +31,12 @@ const PARSE_ATTEMPTS: ParseAttempt[] = [
   { sourceType: 'script', allowReturnOutsideFunction: true },
 ];
 
-type ParseResult = { ast: Program; errors: null } | { ast: null; errors: string[] };
+type ParseError = { message: string; pos: number | null };
+
+type ParseResult = { ast: Program; errors: null } | { ast: null; errors: ParseError[] };
 
 function parseAuto(source: string): ParseResult {
-  const errors: string[] = [];
+  const errors: ParseError[] = [];
   for (const attempt of PARSE_ATTEMPTS) {
     try {
       const ast = acorn.parse(source, {
@@ -45,7 +47,10 @@ function parseAuto(source: string): ParseResult {
       }) as Program;
       return { ast, errors: null };
     } catch (err) {
-      errors.push(err instanceof Error ? err.message : String(err));
+      errors.push({
+        message: err instanceof Error ? err.message : String(err),
+        pos: typeof (err as { pos?: unknown }).pos === 'number' ? (err as { pos: number }).pos : null,
+      });
     }
   }
   return { ast: null, errors };
@@ -98,17 +103,18 @@ export function removeUncoveredRangesAst(
 
   // A hoist-preserving `var x;` can collide with a lexical `x` that legally
   // shadowed the removed declaration; the re-parse detects it, and the retry
-  // drops that name (matching Annex-B semantics, which skip conflicting
-  // hoists) and plans again.
+  // drops that name AT THE COLLIDING SITE ONLY (matching Annex-B semantics,
+  // which skip conflicting hoists) and plans again. Keys are
+  // "<editStart>:<name>" so unrelated scopes keep their hoists.
   const skipHoistNames = new Set<string>();
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const edits = planToFixedPoint(ast, ops, source, skipHoistNames);
     if (edits.length === 0) {
       debugAst('no edits planned for %d ops', ops.length);
       return source;
     }
 
-    const edited = applyEdits(source, edits);
+    const { result: edited, chunks } = applyEdits(source, edits);
     if (edited.length === 0) {
       debugAst('post-edit result empty');
       return null;
@@ -121,22 +127,91 @@ export function removeUncoveredRangesAst(
       return cleanupWhitespace(edited, collectProtectedSpans(reparsed.ast));
     }
 
-    const collision = findRedeclaredName(reparsed.errors);
-    if (!collision || skipHoistNames.has(collision)) {
-      debugAst('edited output failed to parse: %s', reparsed.errors[0] ?? 'unknown');
+    const added = resolveHoistCollision(reparsed.errors, chunks, edits, ast, skipHoistNames);
+    if (!added) {
+      debugAst('edited output failed to parse: %s', reparsed.errors[0]?.message ?? 'unknown');
       return null;
     }
-    skipHoistNames.add(collision);
   }
   return null;
 }
 
-function findRedeclaredName(errors: string[]): string | null {
-  for (const message of errors) {
-    const match = message.match(/Identifier '(.+?)' has already been declared/);
-    if (match) return match[1]!;
+/**
+ * Map a redeclaration error in the edited output back to the hoist-emission
+ * site(s) responsible and record skip keys for them. Returns false when no
+ * new key could be derived (caller then falls back to leaving the file
+ * unchanged).
+ */
+function resolveHoistCollision(
+  errors: ParseError[],
+  chunks: AppliedChunk[],
+  edits: PlannedEdit[],
+  ast: Program,
+  skipHoistNames: Set<string>,
+): boolean {
+  let name: string | null = null;
+  let pos: number | null = null;
+  for (const error of errors) {
+    const match = error.message.match(/Identifier '(.+?)' has already been declared/);
+    if (match) {
+      name = match[1]!;
+      pos = error.pos;
+      break;
+    }
   }
-  return null;
+  if (!name) return false;
+
+  const before = skipHoistNames.size;
+
+  // The error position is in edited coordinates; find whether it lands inside
+  // one of our inserted texts (the usual case: the synthesized `var x;` is
+  // the later declaration) or in original text (the lexical declaration came
+  // after the insertion in source order).
+  const chunk = pos === null ? undefined : chunks.find((c) => pos! >= c.outStart && pos! < c.outEnd);
+  if (chunk && chunk.editStart !== null) {
+    skipHoistNames.add(`${chunk.editStart}:${name}`);
+  } else {
+    // Scope the fallback to the innermost function around the original
+    // position (or the whole file when unknown): drop the name only at
+    // emission sites inside that span.
+    const srcPos = chunk && chunk.srcStart !== null && pos !== null
+      ? chunk.srcStart + (pos - chunk.outStart)
+      : null;
+    const span = srcPos !== null ? innermostFunctionSpan(ast, srcPos) : { start: 0, end: Infinity };
+    const emitsName = new RegExp(`\\bvar\\b[^;]*\\b${escapeRegExp(name)}\\b`);
+    for (const edit of edits) {
+      if (edit.start >= span.start && edit.start < span.end && emitsName.test(edit.text)) {
+        skipHoistNames.add(`${edit.start}:${name}`);
+      }
+    }
+  }
+
+  return skipHoistNames.size > before;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function innermostFunctionSpan(ast: Program, pos: number): ByteRange {
+  let best: ByteRange = { start: 0, end: Infinity };
+
+  function visit(node: Node): void {
+    if (node.start > pos || node.end <= pos) return;
+    if (
+      node.type === 'FunctionDeclaration' ||
+      node.type === 'FunctionExpression' ||
+      node.type === 'ArrowFunctionExpression'
+    ) {
+      if (node.end - node.start < best.end - best.start) {
+        best = { start: node.start, end: node.end };
+      }
+    }
+    forEachChild(node, visit);
+  }
+
+  visit(ast);
+  return best;
 }
 
 /**
@@ -150,14 +225,15 @@ function planToFixedPoint(
   source: string,
   skipHoistNames: Set<string>,
 ): PlannedEdit[] {
+  const shared = buildSharedAnalysis(ast);
   let excluded: ByteRange[] = [];
-  let edits = planEdits(ast, ops, source, excluded, skipHoistNames);
+  let edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared);
 
   for (let i = 0; i < 3; i++) {
     const removed = mergeRanges(edits.flatMap((e) => e.removedSpans ?? []));
     if (sameRanges(removed, excluded)) break;
     excluded = removed;
-    edits = planEdits(ast, ops, source, excluded, skipHoistNames);
+    edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared);
   }
 
   return edits;
@@ -223,22 +299,74 @@ function trimOpBounds(source: string, op: UncoveredOp): UncoveredOp {
 // code is left in place (under-pruning is always acceptable).
 // ---------------------------------------------------------------------------
 
+type SharedAnalysis = {
+  refs: Map<string, ByteRange[]>;
+  hasDirectEval: boolean;
+  /** Spans of validated asm.js modules: V8 does not instrument them, so their
+   * count-0 coverage is meaningless and they must never be pruned. */
+  asmSpans: ByteRange[];
+};
+
+function buildSharedAnalysis(ast: Program): SharedAnalysis {
+  const { refs, hasDirectEval } = buildReferenceIndex(ast);
+  return { refs, hasDirectEval, asmSpans: collectAsmSpans(ast) };
+}
+
+function collectAsmSpans(ast: Program): ByteRange[] {
+  const spans: ByteRange[] = [];
+
+  function visit(node: Node): void {
+    if (
+      node.type === 'FunctionDeclaration' ||
+      node.type === 'FunctionExpression' ||
+      node.type === 'ArrowFunctionExpression'
+    ) {
+      const body = (node as acorn.FunctionDeclaration).body;
+      if (body.type === 'BlockStatement') {
+        const first = body.body[0];
+        if (
+          first?.type === 'ExpressionStatement' &&
+          (first as acorn.ExpressionStatement & { directive?: string }).directive === 'use asm'
+        ) {
+          spans.push({ start: node.start, end: node.end });
+          return;
+        }
+      }
+    }
+    forEachChild(node, visit);
+  }
+
+  visit(ast);
+  return spans;
+}
+
 function planEdits(
   ast: Program,
   ops: UncoveredOp[],
   source: string,
   excludedRefSpans: ByteRange[],
   skipHoistNames: Set<string>,
+  shared: SharedAnalysis,
 ): PlannedEdit[] {
-  const { refs, hasDirectEval } = buildReferenceIndex(ast);
-  const ctx: PlanContext = { source, refs, ops, hasDirectEval, excludedRefSpans, skipHoistNames };
+  const ctx: PlanContext = {
+    source,
+    refs: shared.refs,
+    ops,
+    hasDirectEval: shared.hasDirectEval,
+    excludedRefSpans,
+    skipHoistNames,
+  };
   const edits: PlannedEdit[] = [];
 
   for (const op of ops) {
     visitStatementList(ast.body, op, ctx, edits);
   }
 
-  return dedupeEdits(edits);
+  const deduped = dedupeEdits(edits);
+  if (shared.asmSpans.length === 0) return deduped;
+  return deduped.filter(
+    (edit) => !shared.asmSpans.some((span) => edit.start < span.end && edit.end > span.start),
+  );
 }
 
 /** All identifier spans that read or write a name (excludes declarations, keys, labels). */
@@ -297,7 +425,10 @@ function isReferencePosition(parent: Node | null, key: string | null): boolean {
     case 'MethodDefinition':
       return key !== 'key' || (parent as unknown as { computed: boolean }).computed;
     case 'MemberExpression':
-      return key !== 'property' || (parent as acorn.MemberExpression).computed;
+      // Non-computed property names count too: in classic scripts, top-level
+      // declarations are globalThis properties, so covered `window.fn`
+      // reflection must keep `fn` from being deleted (hollowed instead).
+      return true;
     case 'LabeledStatement':
     case 'BreakStatement':
     case 'ContinueStatement':
@@ -353,8 +484,18 @@ function overlaps(node: Node, op: UncoveredOp): boolean {
   return node.start < op.end && node.end > op.start;
 }
 
+/** ops are sorted and disjoint (built via invertRanges): binary search. */
 function overlapsAnyOp(node: Node, ops: UncoveredOp[]): boolean {
-  return ops.some((op) => overlaps(node, op));
+  let lo = 0;
+  let hi = ops.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const op = ops[mid]!;
+    if (op.end <= node.start) lo = mid + 1;
+    else if (op.start >= node.end) hi = mid - 1;
+    else return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +507,7 @@ function overlapsAnyOp(node: Node, ops: UncoveredOp[]): boolean {
  * inside `node` that hoist to the enclosing function scope. Traversal stops
  * at nested function/class boundaries, whose bindings do not escape.
  */
-function collectHoistedNames(node: Node, skipNames?: Set<string>): string[] {
+function collectHoistedNames(node: Node, skipNames?: Set<string>, siteStart?: number): string[] {
   const names = new Set<string>();
 
   function visit(current: Node, isRoot: boolean): void {
@@ -402,7 +543,7 @@ function collectHoistedNames(node: Node, skipNames?: Set<string>): string[] {
   }
 
   visit(node, true);
-  return [...names].filter((n) => !skipNames?.has(n));
+  return [...names].filter((n) => !skipNames?.has(`${siteStart ?? node.start}:${n}`));
 }
 
 function collectPatternNames(pattern: Node, into: Set<string>): void {
@@ -453,10 +594,22 @@ function visitStatementList(
   // function entries — but any other statement is only deleted when control
   // flow provably could not reach it: the previous kept sibling must end in
   // return/throw/break/continue and contain no suspension point.
-  let terminatorJustified = false;
+  // Statements are in source order; skip straight to the op's neighbourhood
+  // instead of scanning the whole list for every op (large minified files
+  // have thousands of ops and thousands of top-level statements).
+  const first = binarySearchFirstOverlap(statements, op);
+  if (first === -1) return;
 
-  for (let i = 0; i < statements.length; i++) {
+  let terminatorJustified = false;
+  if (first > 0) {
+    const prev = statements[first - 1]!;
+    terminatorJustified =
+      !overlapsAnyOp(prev, ctx.ops) && endsWithTerminator(prev) && !containsSuspension(prev);
+  }
+
+  for (let i = first; i < statements.length; i++) {
     const stmt = statements[i]!;
+    if (stmt.start >= op.end) break;
     if (!overlaps(stmt, op) && !overlapsAnyOp(stmt, ctx.ops)) {
       terminatorJustified = endsWithTerminator(stmt) && !containsSuspension(stmt);
       continue;
@@ -479,6 +632,24 @@ function visitStatementList(
       terminatorJustified = false;
     }
   }
+}
+
+/** Index of the first statement overlapping the op, or -1. */
+function binarySearchFirstOverlap(statements: Node[], op: UncoveredOp): number {
+  let lo = 0;
+  let hi = statements.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const stmt = statements[mid]!;
+    if (stmt.end <= op.start) {
+      lo = mid + 1;
+    } else {
+      if (overlaps(stmt, op)) found = mid;
+      hi = mid - 1;
+    }
+  }
+  return found;
 }
 
 /** Statements whose removal is justified by a dedicated V8 function entry. */
@@ -536,6 +707,13 @@ function containsSuspension(node: Node): boolean {
       case 'AwaitExpression':
       case 'YieldExpression':
         found = true;
+        return;
+      case 'ForOfStatement':
+        if ((current as acorn.ForOfStatement).await) {
+          found = true;
+          return;
+        }
+        forEachChild(current, visit);
         return;
       default:
         forEachChild(current, visit);
@@ -655,7 +833,7 @@ function replaceStatement(
       return { start: stmt.start, end: stmt.end, text: '' };
     default: {
       const removedSpans = [{ start: stmt.start, end: stmt.end }];
-      const hoisted = hoistedVarText(collectHoistedNames(stmt, ctx.skipHoistNames));
+      const hoisted = hoistedVarText(collectHoistedNames(stmt, ctx.skipHoistNames, stmt.start));
       if (hoisted) {
         return { start: stmt.start, end: stmt.end, text: hoisted, removedSpans };
       }
@@ -756,10 +934,10 @@ function replaceSwitchCase(node: acorn.SwitchCase, ctx: PlanContext): PlannedEdi
   const label = ctx.source.slice(node.start, labelEnd).trimEnd();
   const hoisted = new Set<string>();
   for (const stmt of node.consequent) {
-    for (const name of collectHoistedNames(stmt, ctx.skipHoistNames)) hoisted.add(name);
+    for (const name of collectHoistedNames(stmt, ctx.skipHoistNames, node.start)) hoisted.add(name);
     if (stmt.type === 'FunctionDeclaration') {
       const id = (stmt as acorn.FunctionDeclaration).id;
-      if (id && !ctx.skipHoistNames.has(id.name)) hoisted.add(id.name);
+      if (id && !ctx.skipHoistNames.has(`${node.start}:${id.name}`)) hoisted.add(id.name);
     }
   }
   const vars = hoisted.size > 0 ? ` var ${[...hoisted].join(', ')};` : '';
@@ -798,7 +976,7 @@ function replaceEmbeddedStatement(stmt: Node, ctx: PlanContext): PlannedEdit | n
     return hollowFunctionBody(stmt as acorn.FunctionDeclaration, ctx.source);
   }
   if (stmt.type === 'EmptyStatement') return null;
-  const hoisted = collectHoistedNames(stmt, ctx.skipHoistNames);
+  const hoisted = collectHoistedNames(stmt, ctx.skipHoistNames, stmt.start);
   const inner = hoistedVarText(hoisted);
   const text = stmt.type === 'BlockStatement' || inner ? `{${inner ? ` ${inner} ` : ''}}` : ';';
   return {
@@ -1057,11 +1235,11 @@ function removeElseBranch(
   const start = ifNode.consequent.end + match;
   const removedSpans = [{ start: alternate.start, end: alternate.end }];
 
-  const hoisted = collectHoistedNames(alternate, ctx.skipHoistNames);
+  const hoisted = collectHoistedNames(alternate, ctx.skipHoistNames, start);
   if (alternate.type === 'FunctionDeclaration') {
     // Sloppy-mode `else function g() {}` hoists a var-like binding too.
     const id = (alternate as acorn.FunctionDeclaration).id;
-    if (id && !ctx.skipHoistNames.has(id.name) && !hoisted.includes(id.name)) {
+    if (id && !ctx.skipHoistNames.has(`${start}:${id.name}`) && !hoisted.includes(id.name)) {
       hoisted.push(id.name);
     }
   }
@@ -1123,12 +1301,40 @@ function dedupeEdits(edits: PlannedEdit[]): PlannedEdit[] {
   return kept.sort((a, b) => b.start - a.start);
 }
 
-function applyEdits(source: string, edits: PlannedEdit[]): string {
-  let result = source;
-  for (const edit of edits) {
-    result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+type AppliedChunk = {
+  outStart: number;
+  outEnd: number;
+  /** Source offset for copied chunks; null for inserted edit text. */
+  srcStart: number | null;
+  /** Edit start for inserted chunks; null for copied source text. */
+  editStart: number | null;
+};
+
+function applyEdits(
+  source: string,
+  edits: PlannedEdit[],
+): { result: string; chunks: AppliedChunk[] } {
+  const ascending = [...edits].sort((a, b) => a.start - b.start);
+  const parts: string[] = [];
+  const chunks: AppliedChunk[] = [];
+  let srcPos = 0;
+  let outPos = 0;
+
+  const push = (text: string, srcStart: number | null, editStart: number | null): void => {
+    if (text.length === 0) return;
+    parts.push(text);
+    chunks.push({ outStart: outPos, outEnd: outPos + text.length, srcStart, editStart });
+    outPos += text.length;
+  };
+
+  for (const edit of ascending) {
+    push(source.slice(srcPos, edit.start), srcPos, null);
+    push(edit.text, null, edit.start);
+    srcPos = edit.end;
   }
-  return result;
+  push(source.slice(srcPos), srcPos, null);
+
+  return { result: parts.join(''), chunks };
 }
 
 // ---------------------------------------------------------------------------

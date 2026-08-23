@@ -62,6 +62,19 @@ export async function resolvePruneTargets(
       continue;
     }
 
+    // Range offsets are only meaningful against the exact text V8 executed.
+    // Without it the entry's usage data is unrecoverable, so the whole file
+    // is unsafe to prune from its remaining entries. (Checked before the
+    // zero-range guard: sourceless entries are emitted with empty ranges.)
+    if (!entry.source) {
+      poison(
+        filePath,
+        entry.url,
+        'report entry has no embedded source text (file skipped for safety)',
+      );
+      continue;
+    }
+
     if (entry.ranges.length === 0) {
       if (entry.kind === 'css') {
         // Chrome CSS coverage does not survive navigations: a page instance
@@ -78,18 +91,6 @@ export async function resolvePruneTargets(
       } else {
         skipped.push({ url: entry.url, reason: 'no covered ranges (skipped for safety)' });
       }
-      continue;
-    }
-
-    // Range offsets are only meaningful against the exact text V8 executed.
-    // Without it we cannot verify the disk file is in the same coordinate
-    // space, so pruning would be a blind byte-slice of the wrong text.
-    if (!entry.source) {
-      poison(
-        filePath,
-        entry.url,
-        'report entry has no embedded source text (file skipped for safety)',
-      );
       continue;
     }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { extractJsCoverage } from './extract.js';
+import { buildCoverageReport, extractJsCoverage } from './extract.js';
+import { validateReport } from '../report/io.js';
 
 /**
  * Fixtures mirror real Playwright/Chrome output: V8 always emits a
@@ -227,6 +228,32 @@ describe('extractJsCoverage', () => {
     const { covered, stub } = extractJsCoverage(entry);
     expect(covered).toEqual([]);
     expect(stub).toEqual([]);
+  });
+
+  it('emits a zero-range marker for entries whose source is missing', () => {
+    // A saved report must always pass its own validation, and the resolver
+    // must see that this file's usage data is incomplete.
+    const report = buildCoverageReport(
+      '/root',
+      [
+        {
+          url: 'http://localhost/evicted.js',
+          functions: [
+            {
+              functionName: '',
+              isBlockCoverage: true,
+              ranges: [{ startOffset: 0, endOffset: 40, count: 1 }],
+            },
+          ],
+        },
+        { url: 'http://localhost/nothing.js', functions: [] },
+      ],
+      [],
+    );
+    expect(report.entries).toEqual([
+      { url: 'http://localhost/evicted.js', source: '', kind: 'js', ranges: [] },
+    ]);
+    expect(() => validateReport(report)).not.toThrow();
   });
 
   it('handles an empty functions array and ignores zero-length ranges', () => {

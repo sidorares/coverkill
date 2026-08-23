@@ -32,8 +32,17 @@ export function buildCoverageReport(
 
   for (const entry of js) {
     const source = entry.source ?? '';
+    if (source.length === 0) {
+      // Without the executed text the ranges are uninterpretable (and a saved
+      // report containing them would fail its own validation). Keep a
+      // zero-range marker when there WAS coverage, so the resolver knows this
+      // file's usage data is incomplete and skips it.
+      if (entry.functions.length > 0) {
+        entries.push({ url: entry.url, source: '', kind: 'js', ranges: [] });
+      }
+      continue;
+    }
     const { covered, stub } = extractJsCoverage(entry);
-    if (source.length === 0 && covered.length === 0 && stub.length === 0) continue;
     entries.push({
       url: entry.url,
       source,
@@ -45,13 +54,17 @@ export function buildCoverageReport(
 
   for (const entry of css) {
     const source = entry.text ?? '';
-    const ranges = entry.ranges.map((r) => ({ start: r.start, end: r.end }));
-    if (source.length === 0 && ranges.length === 0) continue;
+    if (source.length === 0) {
+      if (entry.ranges.length > 0) {
+        entries.push({ url: entry.url, source: '', kind: 'css', ranges: [] });
+      }
+      continue;
+    }
     entries.push({
       url: entry.url,
       source,
       kind: 'css',
-      ranges: mergeRanges(ranges),
+      ranges: mergeRanges(entry.ranges.map((r) => ({ start: r.start, end: r.end }))),
     });
   }
 

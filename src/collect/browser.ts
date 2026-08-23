@@ -55,12 +55,21 @@ export async function collectCoverage(
     });
 
     const css: Awaited<ReturnType<Page['coverage']['stopCSSCoverage']>> = [];
+    let firstScenario = true;
     for (const { fn } of scenarios) {
       if (config.coverage.css.enabled) {
+        if (!firstScenario) {
+          // Unload the previous scenario's page first: starting a CSS session
+          // while its stylesheets are still loaded re-registers them, and the
+          // next navigation turns them into zero-range ghost entries that the
+          // resolver must then treat as lost usage.
+          await page.goto('about:blank');
+        }
         await page.coverage.startCSSCoverage({
           resetOnNavigation: config.coverage.css.resetOnNavigation,
         });
       }
+      firstScenario = false;
       await fn({ page, baseURL: config.baseURL });
       if (config.coverage.css.enabled) {
         css.push(...(await page.coverage.stopCSSCoverage()));

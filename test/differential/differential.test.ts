@@ -522,6 +522,35 @@ route(1);
     },
   },
   {
+    name: 'ai: hoist collision in one scope must not drop hoists in other scopes',
+    source: `
+function outer1(c) {
+  let g = 1;
+  if (c) { function g() {} }
+  console.log('o1:' + g);
+}
+function outer2(c) {
+  if (c) { function g() {} }
+  console.log('o2:' + g);
+}
+outer1(false);
+outer2(false);
+`,
+  },
+  {
+    name: 'aj: validated asm.js modules are never pruned (V8 does not instrument them)',
+    source: `
+function AsmModule() {
+  'use asm';
+  function add(x, y) { x = x | 0; y = y | 0; return (x + y) | 0; }
+  function deadOp(x) { x = x | 0; return (x * 2) | 0; }
+  return { add: add, deadOp: deadOp };
+}
+const m = AsmModule();
+console.log('asm:' + m.add(2, 3));
+`,
+  },
+  {
     name: 'x: CJS script with top-level return is still prunable',
     source: `
 console.log('before-return');
