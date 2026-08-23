@@ -75,6 +75,7 @@ ranges) is still read; `normalizeReport` collapses both versions into the same
 | `src/report/import.ts` | Raw `NODE_V8_COVERAGE` / CDP / Playwright / DevTools JSON → report v2, hashing `file://` sources from disk (only when the file still fits the coverage offsets). |
 | `src/report/hash.ts` | `sha256-` hashing of executed text; the guard when a report omits `source`. |
 | `src/report/merge.ts` | Range algebra: merge / subtract / invert / range→lines. |
+| `src/report/merge-reports.ts` | `coverkill merge`: cross-run union. Deliberately just concatenation — classification and covered-wins live at prune time in the resolver — plus loud failures for cross-run source mismatches (different builds) and v1 inputs. |
 | `src/report/io.ts` | `saveReport` / `loadReport` (auto-detects raw V8 input) + structural validation of untrusted JSON. |
 | `src/prune/resolve.ts` | URL → disk path, `include`/`exclude`, and the safety guards that decide a file is unprunable. |
 | `src/prune/ast-prune.ts` | **The JS planner.** The most delicate file in the repo. |
@@ -228,7 +229,7 @@ Open issues carry the roadmap and the design reasoning behind each item
 
 - **#4** — source maps, so pruning targets `src/` instead of ephemeral `dist/`.
 - **#5** — `coverkill merge` to union coverage across runs (locales, viewports,
-  flag assignments).
+  flag assignments); shipped as the `merge` command.
 - **#6** — loud stub mode: pruned paths `throw` or beacon instead of silently
   evaluating to `0`/`{}`.
 - **#7** — `/* coverkill-keep */` pragmas and max-percent-removed thresholds.

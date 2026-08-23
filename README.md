@@ -82,6 +82,7 @@ By default, matching files are **modified in place**. Use git so you can revert.
 | `coverkill collect` | Collect coverage and write a report file |
 | `coverkill prune --report <file>` | Prune from a saved report, a raw V8 coverage file, or a `NODE_V8_COVERAGE` directory |
 | `coverkill import <inputs...>` | Convert raw V8 / DevTools coverage into a coverkill report |
+| `coverkill merge <reports...>` | Union coverage from multiple runs into one report (covered-anywhere-wins) |
 
 ### Flags
 
@@ -94,9 +95,38 @@ By default, matching files are **modified in place**. Use git so you can revert.
 - `import -o, --out <path>` — report destination (default `coverkill-coverage.json`)
 - `import --root-dir <path>` — `rootDir` recorded in the report (default: cwd)
 - `import --strip-source` — store only source hashes, not the source text
+- `merge -o, --out <path>` — merged report destination (default `coverkill-coverage.json`)
+- `merge --root-dir <path>` — `rootDir` recorded in the merged report (required when inputs disagree)
 
 `prune` and `import` use only the prune half of the config, so a config file for
-them needs no `baseURL` or `scenarios`.
+them needs no `baseURL` or `scenarios`; `merge` needs no config at all.
+
+## Merging coverage across runs
+
+A single run is one browser session, one viewport, one locale, one set of
+feature flags — anything it does not exercise is indistinguishable from dead
+code. `coverkill merge` unions the evidence from several runs before pruning,
+turning "we think this is dead" into "no configuration we tested reaches this":
+
+```bash
+coverkill collect -o run-desktop.json   # one report per viewport / locale / flag set
+coverkill collect -o run-mobile.json
+coverkill merge -o merged.json run-desktop.json run-mobile.json
+coverkill prune -r merged.json
+```
+
+Union semantics are **covered-anywhere-wins**: a byte that executed in any run
+is covered, and a branch is only stubbed (or a function deleted) if no run
+executed it. Inputs can be coverkill v2 reports, raw V8/DevTools dumps, or
+`NODE_V8_COVERAGE` directories — anything `prune -r` accepts, except report v1
+(its pre-classified ranges cannot be merged; re-collect or re-import).
+
+All runs must come from the same build: when the same URL carries different
+source text in two inputs, the offsets are in different coordinate spaces and
+the merge fails with an error — rather than producing a report whose files
+would all be silently skipped at prune time. Zero-range CSS entries (Chrome
+losing usage data on navigation) are carried through verbatim, so they still
+protect their file from being pruned on partial evidence.
 
 ## Pruning coverage from other tools
 
