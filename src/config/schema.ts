@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import type { CoverkillConfig, ResolvedCoverkillConfig, ResolvedPruneConfig } from './types.js';
+import { PRUNE_MODES } from '../prune/stubs.js';
+
+const pruneModeSchema = z.enum(PRUNE_MODES);
 
 const webServerSchema = z.object({
   command: z.string().min(1),
@@ -44,6 +47,7 @@ const rawConfigSchema = z.object({
   exclude: z.array(z.string()).optional(),
   preserveLicenseHeader: z.boolean().optional(),
   cssSafelist: z.array(z.string()).optional(),
+  pruneMode: pruneModeSchema.optional(),
 });
 
 /**
@@ -58,6 +62,7 @@ const prunePartialSchema = z.object({
   exclude: z.array(z.string()).optional(),
   preserveLicenseHeader: z.boolean().optional(),
   cssSafelist: z.array(z.string()).optional(),
+  pruneMode: pruneModeSchema.optional(),
 });
 
 export function parsePruneConfig(
@@ -70,6 +75,7 @@ export function parsePruneConfig(
     rootDir: parsed.rootDir ?? process.cwd(),
     sourcePath: sourcePathFn,
     preserveLicenseHeader: parsed.preserveLicenseHeader ?? true,
+    pruneMode: parsed.pruneMode ?? 'silent',
   };
 }
 
@@ -100,5 +106,6 @@ export function parseConfig(
     browser: parsed.browser ?? { headless: true },
     report: { includeSource: parsed.report?.includeSource ?? true },
     preserveLicenseHeader: parsed.preserveLicenseHeader ?? true,
+    pruneMode: parsed.pruneMode ?? 'silent',
   };
 }

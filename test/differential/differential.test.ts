@@ -567,6 +567,89 @@ return console.log('top-level-return');
   },
 ];
 
+// Loud stub modes (issue #6) must not change behavior on EXECUTED paths
+// either: a deterministic replay never reaches a pruned path, so no throw
+// fires and no beacon reports — the differential oracle applies unchanged.
+const loudFixtures: Array<Fixture & { pruneMode: 'throw' | 'beacon' }> = [
+  {
+    name: 'loud-throw: dead branches and a hollowed referenced function never fire on replay',
+    pruneMode: 'throw',
+    source: `
+function branch(x) {
+  if (x > 0) {
+    console.log('then:' + x);
+  } else {
+    console.log('else:' + x);
+  }
+  return x > 0 ? 'pos' : 'neg';
+}
+function deadHelper() { console.log('DEAD_HELPER'); }
+function keep() { return typeof deadHelper; }
+console.log('r:' + branch(3));
+console.log('t:' + keep());
+`,
+    extra: (result) => {
+      expect(result.prunedSource).toContain('coverkill: pruned path executed');
+      expect(result.prunedSource).not.toContain('DEAD_HELPER');
+    },
+  },
+  {
+    name: 'loud-throw: switch case, guarded tail, and ternary stubs stay dormant on replay',
+    pruneMode: 'throw',
+    source: `
+function pick(k) {
+  switch (k) {
+    case 'a': return 1;
+    case 'b': return 2;
+  }
+  return 0;
+}
+function guard(x) {
+  if (x > 100) return 'big';
+  console.log('small:' + x);
+  return 'small';
+}
+console.log('p:' + pick('a'));
+console.log('g:' + guard(5));
+console.log('f:' + (pick('a') === 1 ? 'yes' : 'no'));
+`,
+  },
+  {
+    name: 'loud-beacon: no beacon fires on replay even with the collector installed',
+    pruneMode: 'beacon',
+    source: `
+globalThis.__coverkillPrunedPathHit = function (loc) { console.log('beacon:' + loc); };
+globalThis.__coverkillPrunedPathHit('warmup');
+function branch(x) {
+  if (x > 0) {
+    console.log('then:' + x);
+  } else {
+    console.log('else:' + x);
+  }
+}
+branch(2);
+console.log('v:' + (branch.length > 0 ? 'has-arg' : 'no-arg'));
+`,
+    extra: (result) => {
+      expect(result.prunedSource).toContain('globalThis.__coverkillPrunedPathHit?.(');
+    },
+  },
+  {
+    name: 'loud-beacon: absent collector global makes beacons a no-op',
+    pruneMode: 'beacon',
+    source: `
+function branch(x) {
+  if (x > 0) {
+    console.log('then:' + x);
+  } else {
+    console.log('else:' + x);
+  }
+}
+branch(2);
+`,
+  },
+];
+
 describe('differential: pruned script behaves identically on executed paths', () => {
   afterAll(async () => {
     await cleanupDifferential();
@@ -579,6 +662,14 @@ describe('differential: pruned script behaves identically on executed paths', ()
     if (!fixture.expectEmptyOutput) {
       expect(result.original.length).toBeGreaterThan(0);
     }
+    expect(result.pruned).toEqual(result.original);
+    fixture.extra?.(result);
+  });
+
+  it.each(loudFixtures)('$name', async (fixture) => {
+    const result = await runDifferential(fixture.source, { pruneMode: fixture.pruneMode });
+    expect(result.original.length).toBeGreaterThan(0);
+    expect(result.changed).toBe(true);
     expect(result.pruned).toEqual(result.original);
     fixture.extra?.(result);
   });

@@ -2,6 +2,7 @@ import type { ByteRange, SourceType } from '../report/types.js';
 import { invertRanges, mergeRanges, subtractRanges } from '../report/merge.js';
 import { removeUncoveredRangesAst } from './ast-prune.js';
 import { pruneCss } from './css.js';
+import { StubAnnouncer, type PruneMode } from './stubs.js';
 
 export type RemoveUncoveredOptions = {
   preserveLicenseHeader?: boolean;
@@ -12,6 +13,16 @@ export type RemoveUncoveredOptions = {
   sourceType?: SourceType;
   /** CSS only: regex sources; matching selectors/preludes are always kept */
   cssSafelist?: string[];
+  /**
+   * JS only: how a pruned-but-still-reachable path behaves at runtime.
+   * 'silent' (default) keeps the byte-minimal no-op stubs; 'throw' makes every
+   * stub throw when executed; 'beacon' calls
+   * `globalThis.__coverkillPrunedPathHit?.(location)` and then behaves like the
+   * silent stub.
+   */
+  pruneMode?: PruneMode;
+  /** JS only: file label used in loud stub locations (`label:line`). */
+  stubLabel?: string;
 };
 
 export function removeUncoveredRanges(
@@ -71,11 +82,12 @@ export function removeUncoveredRanges(
 
   const uncovered = invertRanges(source.length, adjustedCovered);
   const ops = buildPruneOps(uncovered, stubs);
+  const announcer = new StubAnnouncer(source, options?.pruneMode, options?.stubLabel);
   let result = source;
 
   for (const op of ops) {
     const replacement =
-      op.kind === 'stub' ? stubReplacement(source, op.start, op.end) : '';
+      op.kind === 'stub' ? stubReplacement(source, op.start, op.end, announcer) : '';
     result = result.slice(0, op.start) + replacement + result.slice(op.end);
   }
 
@@ -108,20 +120,23 @@ function buildPruneOps(uncovered: ByteRange[], stubs: ByteRange[]): PruneOp[] {
 }
 
 /** Replace an uncovered branch/block while keeping surrounding syntax valid. */
-export function stubReplacement(source: string, start: number, end: number): string {
+export function stubReplacement(
+  source: string,
+  start: number,
+  end: number,
+  announcer?: StubAnnouncer,
+): string {
   const text = source.slice(start, end);
+  const announce = announcer?.statement(start) ?? '';
   const elseMatch = text.match(/^(\s*)else\b/);
   if (elseMatch) {
-    return `${elseMatch[1]}else {}`;
+    return `${elseMatch[1]}else {${announce ? ` ${announce} ` : ''}}`;
   }
   const trimmed = text.trim();
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-    return '{}';
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || text.includes('\n')) {
+    return announce ? `{ ${announce} }` : '{}';
   }
-  if (text.includes('\n')) {
-    return '{}';
-  }
-  return '0';
+  return announcer?.expression(start, '0') ?? '0';
 }
 
 /**

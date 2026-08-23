@@ -231,7 +231,9 @@ Open issues carry the roadmap and the design reasoning behind each item
 - **#5** — `coverkill merge` to union coverage across runs (locales, viewports,
   flag assignments); shipped as the `merge` command.
 - **#6** — loud stub mode: pruned paths `throw` or beacon instead of silently
-  evaluating to `0`/`{}`.
+  evaluating to `0`/`{}`; shipped as `pruneMode: 'silent' | 'throw' | 'beacon'`
+  (`src/prune/stubs.ts`, announcement text injected by every stub shape in
+  `ast-prune.ts`).
 - **#7** — `/* coverkill-keep */` pragmas and max-percent-removed thresholds.
 - **#8** — warn when workers, service workers, iframes, or popups ran.
 - **#9** — per-navigation CSS deltas via CDP, so shared stylesheets are prunable

@@ -1,6 +1,13 @@
 import { createRequire } from 'node:module';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { run, collect, prune, importCoverage, mergeCoverage } from './index.js';
+import { PRUNE_MODES } from './prune/stubs.js';
+
+const pruneModeOption = new Option(
+  '--prune-mode <mode>',
+  'How pruned-but-reachable JS paths behave: silent no-op stubs, stubs that ' +
+    'throw, or stubs that call globalThis.__coverkillPrunedPathHit (overrides config)',
+).choices([...PRUNE_MODES]);
 
 const pkg = createRequire(import.meta.url)('../package.json') as { version: string };
 
@@ -17,12 +24,14 @@ program
   .description('Collect coverage and prune uncovered code (default)')
   .option('--dry-run', 'Report pruning without writing files', false)
   .option('--save-report <path>', 'Also save the coverage report JSON')
+  .addOption(pruneModeOption)
   .action(async (opts, command) => {
     const global = command.parent?.opts() ?? {};
     await run({
       configPath: global.config,
       dryRun: opts.dryRun,
       saveReport: opts.saveReport,
+      pruneMode: opts.pruneMode,
     });
   });
 
@@ -95,12 +104,14 @@ program
     'Path to a coverkill report, a raw V8 coverage JSON file, or a NODE_V8_COVERAGE directory',
   )
   .option('--dry-run', 'Report pruning without writing files', false)
+  .addOption(pruneModeOption)
   .action(async (opts, command) => {
     const global = command.parent?.opts() ?? {};
     await prune({
       configPath: global.config,
       reportPath: opts.report,
       dryRun: opts.dryRun,
+      pruneMode: opts.pruneMode,
     });
   });
 

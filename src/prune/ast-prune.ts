@@ -3,6 +3,7 @@ import type { Node, Program } from 'acorn';
 import type { ByteRange, SourceType } from '../report/types.js';
 import { invertRanges, mergeRanges } from '../report/merge.js';
 import type { RemoveUncoveredOptions } from './ranges.js';
+import { StubAnnouncer } from './stubs.js';
 
 type UncoveredOp = { start: number; end: number };
 
@@ -85,6 +86,8 @@ type PlanContext = {
   excludedRefSpans: ByteRange[];
   /** Hoist names proven to collide with lexical declarations (retry pass). */
   skipHoistNames: Set<string>;
+  /** Loud-mode announcement text for stubs (no-op in silent mode). */
+  stubs: StubAnnouncer;
 };
 
 /**
@@ -120,9 +123,11 @@ export function removeUncoveredRangesAst(
   // drops that name AT THE COLLIDING SITE ONLY (matching Annex-B semantics,
   // which skip conflicting hoists) and plans again. Keys are
   // "<editStart>:<name>" so unrelated scopes keep their hoists.
+  const stubs = new StubAnnouncer(source, options?.pruneMode, options?.stubLabel);
+
   const skipHoistNames = new Set<string>();
   for (let attempt = 0; attempt < 6; attempt++) {
-    const edits = planToFixedPoint(ast, ops, source, skipHoistNames);
+    const edits = planToFixedPoint(ast, ops, source, skipHoistNames, stubs);
     if (edits.length === 0) {
       debugAst('no edits planned for %d ops', ops.length);
       return source;
@@ -238,16 +243,17 @@ function planToFixedPoint(
   ops: UncoveredOp[],
   source: string,
   skipHoistNames: Set<string>,
+  stubs: StubAnnouncer,
 ): PlannedEdit[] {
   const shared = buildSharedAnalysis(ast);
   let excluded: ByteRange[] = [];
-  let edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared);
+  let edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared, stubs);
 
   for (let i = 0; i < 3; i++) {
     const removed = mergeRanges(edits.flatMap((e) => e.removedSpans ?? []));
     if (sameRanges(removed, excluded)) break;
     excluded = removed;
-    edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared);
+    edits = planEdits(ast, ops, source, excluded, skipHoistNames, shared, stubs);
   }
 
   return edits;
@@ -361,6 +367,7 @@ function planEdits(
   excludedRefSpans: ByteRange[],
   skipHoistNames: Set<string>,
   shared: SharedAnalysis,
+  stubs: StubAnnouncer,
 ): PlannedEdit[] {
   const ctx: PlanContext = {
     source,
@@ -369,6 +376,7 @@ function planEdits(
     hasDirectEval: shared.hasDirectEval,
     excludedRefSpans,
     skipHoistNames,
+    stubs,
   };
   const edits: PlannedEdit[] = [];
 
@@ -798,7 +806,6 @@ function replaceStatement(
   ctx: PlanContext,
   position: ListPosition | null,
 ): PlannedEdit | null {
-  const { source } = ctx;
   switch (stmt.type) {
     case 'FunctionDeclaration': {
       const fn = stmt as acorn.FunctionDeclaration;
@@ -807,7 +814,7 @@ function replaceStatement(
       // referenced functions are hollowed instead of deleted. Direct eval
       // can reference anything, so it disables deletion entirely.
       if (fn.id && (ctx.hasDirectEval || isReferencedOutside(ctx, fn.id.name, stmt))) {
-        return hollowFunctionBody(fn, source);
+        return hollowFunctionBody(fn, ctx);
       }
       return {
         start: stmt.start,
@@ -819,12 +826,7 @@ function replaceStatement(
     case 'ClassDeclaration': {
       const cls = stmt as acorn.ClassDeclaration;
       if (cls.id && (ctx.hasDirectEval || isReferencedOutside(ctx, cls.id.name, stmt))) {
-        return {
-          start: stmt.start,
-          end: stmt.end,
-          text: `${source.slice(stmt.start, cls.body.start)}{}`,
-          removedSpans: [{ start: cls.body.start, end: cls.body.end }],
-        };
+        return hollowClassBody(cls, ctx);
       }
       return {
         start: stmt.start,
@@ -834,7 +836,7 @@ function replaceStatement(
       };
     }
     case 'VariableDeclaration':
-      return replaceVariableDeclaration(stmt as acorn.VariableDeclaration, source);
+      return replaceVariableDeclaration(stmt as acorn.VariableDeclaration, ctx);
     case 'ImportDeclaration':
     case 'ExportAllDeclaration':
       // Imports create bindings and have side effects; export * shapes the
@@ -848,6 +850,15 @@ function replaceStatement(
     default: {
       const removedSpans = [{ start: stmt.start, end: stmt.end }];
       const hoisted = hoistedVarText(collectHoistedNames(stmt, ctx.skipHoistNames, stmt.start));
+      // Loud modes replace the statement with an announcing block instead of
+      // deleting it: deletion here is terminator-gated on `endsWithTerminator`,
+      // which accepts an if-statement where only ONE arm terminates — so the
+      // spot can still be reached when production takes the other arm.
+      const announce = ctx.stubs.statement(stmt.start);
+      if (announce) {
+        const text = `{${hoisted ? ` ${hoisted}` : ''} ${announce} }`;
+        return { start: stmt.start, end: stmt.end, text, removedSpans };
+      }
       if (hoisted) {
         return { start: stmt.start, end: stmt.end, text: hoisted, removedSpans };
       }
@@ -869,36 +880,30 @@ function hollowExportDeclaration(stmt: Node, ctx: PlanContext): PlannedEdit | nu
 }
 
 function hollowDeclaration(decl: Node, ctx: PlanContext): PlannedEdit | null {
-  const { source } = ctx;
   if (decl.type === 'FunctionDeclaration') {
-    return hollowFunctionBody(decl as acorn.FunctionDeclaration, source);
+    return hollowFunctionBody(decl as acorn.FunctionDeclaration, ctx);
   }
   if (decl.type === 'ClassDeclaration') {
-    const cls = decl as acorn.ClassDeclaration;
-    return {
-      start: decl.start,
-      end: decl.end,
-      text: `${source.slice(decl.start, cls.body.start)}{}`,
-      removedSpans: [{ start: cls.body.start, end: cls.body.end }],
-    };
+    return hollowClassBody(decl as acorn.ClassDeclaration, ctx);
   }
   if (decl.type === 'VariableDeclaration') {
-    return replaceVariableDeclaration(decl as acorn.VariableDeclaration, source);
+    return replaceVariableDeclaration(decl as acorn.VariableDeclaration, ctx);
   }
   if (decl.type === 'ArrowFunctionExpression' || decl.type === 'FunctionExpression') {
-    return hollowFunctionBody(decl as acorn.ArrowFunctionExpression, source);
+    return hollowFunctionBody(decl as acorn.ArrowFunctionExpression, ctx);
   }
   return null;
 }
 
 function hollowFunctionBody(
   fn: acorn.FunctionDeclaration | acorn.FunctionExpression | acorn.ArrowFunctionExpression,
-  source: string,
+  ctx: PlanContext,
 ): PlannedEdit {
+  const { source } = ctx;
   const body = fn.body;
   // Preserve the bytes after the body too: a parenthesized arrow expression
   // body ((x) => ({...})) keeps its closing paren outside body.end.
-  const replacement = body.type === 'BlockStatement' ? '{}' : 'void 0';
+  const replacement = hollowBodyText(body, ctx);
   const text = `${source.slice(fn.start, body.start)}${replacement}${source.slice(body.end, fn.end)}`;
   return {
     start: fn.start,
@@ -908,9 +913,41 @@ function hollowFunctionBody(
   };
 }
 
+/**
+ * Replacement for a hollowed function body: `{}` / `void 0`, or in loud modes
+ * an announcing body. An expression-position body cannot `throw` directly, so
+ * the announcer wraps it in an immediately-invoked arrow.
+ */
+function hollowBodyText(body: Node, ctx: PlanContext): string {
+  if (body.type === 'BlockStatement') {
+    const announce = ctx.stubs.statement(body.start);
+    return announce ? `{ ${announce} }` : '{}';
+  }
+  return ctx.stubs.expression(body.start, 'void 0') ?? 'void 0';
+}
+
+/**
+ * A class that never evaluated keeps its shape (name, heritage) with an
+ * emptied body. In loud modes the body gets a static initialization block, so
+ * the announcement fires the moment the pruned definition actually evaluates.
+ */
+function hollowClassBody(
+  cls: acorn.ClassDeclaration | acorn.ClassExpression,
+  ctx: PlanContext,
+): PlannedEdit {
+  const announce = ctx.stubs.statement(cls.body.start);
+  const bodyText = announce ? `{ static { ${announce} } }` : '{}';
+  return {
+    start: cls.start,
+    end: cls.end,
+    text: `${ctx.source.slice(cls.start, cls.body.start)}${bodyText}`,
+    removedSpans: [{ start: cls.body.start, end: cls.body.end }],
+  };
+}
+
 function replaceVariableDeclaration(
   decl: acorn.VariableDeclaration,
-  source: string,
+  ctx: PlanContext,
 ): PlannedEdit | null {
   // `var x = heavyInit()` never executed still hoists a binding that covered
   // code may assign or read; keep the binding, drop the initializer. Skip
@@ -922,12 +959,19 @@ function replaceVariableDeclaration(
     names.push(declarator.id.name);
   }
   if (names.length === 0) return null;
-  const text =
-    decl.kind === 'const'
-      ? `const ${names.map((n) => `${n} = void 0`).join(', ')};`
-      : `${decl.kind} ${names.join(', ')};`;
+  // Loud modes announce through the first dropped initializer: reaching the
+  // declaration at runtime would have evaluated it. Declarations that never
+  // had an initializer stay silent — executing them is not observable.
+  const firstInit = decl.declarations.findIndex((d) => d.init);
+  const announce =
+    firstInit === -1 ? null : ctx.stubs.expression(decl.declarations[firstInit]!.init!.start, 'void 0');
+  const declarators = names.map((n, i) => {
+    if (i === firstInit && announce) return `${n} = ${announce}`;
+    return decl.kind === 'const' ? `${n} = void 0` : n;
+  });
+  const text = `${decl.kind} ${declarators.join(', ')};`;
   if (text.length >= decl.end - decl.start) {
-    // No byte savings — leave the original in place.
+    // No byte savings — leave the original in place (also maximally faithful).
     return null;
   }
   return {
@@ -955,10 +999,11 @@ function replaceSwitchCase(node: acorn.SwitchCase, ctx: PlanContext): PlannedEdi
     }
   }
   const vars = hoisted.size > 0 ? ` var ${[...hoisted].join(', ')};` : '';
+  const announce = ctx.stubs.statement(labelEnd);
   return {
     start: node.start,
     end: node.end,
-    text: `${label}${vars} break;`,
+    text: `${label}${vars}${announce ? ` ${announce}` : ''} break;`,
     removedSpans: [{ start: labelEnd, end: node.end }],
   };
 }
@@ -983,16 +1028,20 @@ function isReferencedOutside(ctx: PlanContext, name: string, node: Node): boolea
 function replaceEmbeddedStatement(stmt: Node, ctx: PlanContext): PlannedEdit | null {
   if (stmt.type === 'VariableDeclaration') {
     // `if (e) var t = 1` — var must keep its binding (let/const are illegal here).
-    return replaceVariableDeclaration(stmt as acorn.VariableDeclaration, ctx.source);
+    return replaceVariableDeclaration(stmt as acorn.VariableDeclaration, ctx);
   }
   if (stmt.type === 'FunctionDeclaration') {
     // Sloppy-mode `if (x) function g() {}` — keep the Annex-B binding.
-    return hollowFunctionBody(stmt as acorn.FunctionDeclaration, ctx.source);
+    return hollowFunctionBody(stmt as acorn.FunctionDeclaration, ctx);
   }
   if (stmt.type === 'EmptyStatement') return null;
   const hoisted = collectHoistedNames(stmt, ctx.skipHoistNames, stmt.start);
   const inner = hoistedVarText(hoisted);
-  const text = stmt.type === 'BlockStatement' || inner ? `{${inner ? ` ${inner} ` : ''}}` : ';';
+  const announce = ctx.stubs.statement(stmt.start);
+  const text =
+    stmt.type === 'BlockStatement' || inner || announce
+      ? `{${inner ? ` ${inner}` : ''}${announce ? ` ${announce}` : ''}${inner || announce ? ' ' : ''}}`
+      : ';';
   return {
     start: stmt.start,
     end: stmt.end,
@@ -1016,7 +1065,6 @@ function visitPartial(
   edits: PlannedEdit[],
   elseHazard = false,
 ): void {
-  const { source } = ctx;
   switch (node.type) {
     case 'BlockStatement':
       // Braces terminate any dangling-else ambiguity.
@@ -1108,7 +1156,7 @@ function visitPartial(
       const n = node as acorn.ConditionalExpression;
       for (const branch of [n.consequent, n.alternate]) {
         if (whollyInside(branch, op)) {
-          edits.push(expressionEdit(branch, source));
+          edits.push(expressionEdit(branch, ctx));
         } else if (overlaps(branch, op)) {
           visitPartial(branch, op, ctx, edits);
         }
@@ -1122,7 +1170,7 @@ function visitPartial(
     case 'LogicalExpression': {
       const n = node as acorn.LogicalExpression;
       if (whollyInside(n.right, op)) {
-        edits.push(expressionEdit(n.right, source));
+        edits.push(expressionEdit(n.right, ctx));
       } else if (overlaps(n.right, op)) {
         visitPartial(n.right, op, ctx, edits);
       }
@@ -1158,7 +1206,7 @@ function visitPartial(
           edits.push({
             start: body.start,
             end: body.end,
-            text: body.type === 'BlockStatement' ? '{}' : 'void 0',
+            text: hollowBodyText(body, ctx),
             removedSpans: [{ start: body.start, end: body.end }],
           });
         } else {
@@ -1176,15 +1224,9 @@ function visitPartial(
             // A function-valued expression that never ran keeps its shape
             // (params, async modifiers) with an emptied body: it may be
             // stored, passed, or compared by covered code.
-            edits.push(hollowFunctionBody(child as acorn.FunctionExpression, source));
+            edits.push(hollowFunctionBody(child as acorn.FunctionExpression, ctx));
           } else if (child.type === 'ClassExpression') {
-            const cls = child as acorn.ClassExpression;
-            edits.push({
-              start: child.start,
-              end: child.end,
-              text: `${source.slice(child.start, cls.body.start)}{}`,
-              removedSpans: [{ start: cls.body.start, end: cls.body.end }],
-            });
+            edits.push(hollowClassBody(child as acorn.ClassExpression, ctx));
           } else if (isEntryBackedStatement(child)) {
             // Only function-backed statements carry their own V8 evidence;
             // other statements here lack sibling context for the terminator
@@ -1209,23 +1251,17 @@ function isStatementNode(node: Node): boolean {
   return node.type.endsWith('Statement') || node.type.endsWith('Declaration');
 }
 
-function expressionEdit(node: Node, source: string): PlannedEdit {
+function expressionEdit(node: Node, ctx: PlanContext): PlannedEdit {
   if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
-    return hollowFunctionBody(node as acorn.FunctionExpression, source);
+    return hollowFunctionBody(node as acorn.FunctionExpression, ctx);
   }
   if (node.type === 'ClassExpression') {
-    const cls = node as acorn.ClassExpression;
-    return {
-      start: node.start,
-      end: node.end,
-      text: `${source.slice(node.start, cls.body.start)}{}`,
-      removedSpans: [{ start: cls.body.start, end: cls.body.end }],
-    };
+    return hollowClassBody(node as acorn.ClassExpression, ctx);
   }
   return {
     start: node.start,
     end: node.end,
-    text: '0',
+    text: ctx.stubs.expression(node.start, '0') ?? '0',
     removedSpans: [{ start: node.start, end: node.end }],
   };
 }
@@ -1258,15 +1294,19 @@ function removeElseBranch(
     }
   }
 
-  if (hoisted.length === 0 && !elseHazard) {
+  // Loud modes keep the `else` so the pruned path announces itself when the
+  // condition turns out falsy in production.
+  const announce = ctx.stubs.statement(alternate.start);
+  if (hoisted.length === 0 && !elseHazard && !announce) {
     // The alternate's own terminator is consumed by the deletion; a braceless
     // unterminated consequent (`if (y) y = 3`) would otherwise ASI-join the
     // next statement.
     const text = isTerminatedStatement(ifNode.consequent, source) ? '' : ';';
     return { start, end: alternate.end, text, removedSpans };
   }
-  const inner = hoisted.length > 0 ? ` var ${hoisted.join(', ')}; ` : '';
-  return { start, end: alternate.end, text: `else {${inner}}`, removedSpans };
+  const inner = hoisted.length > 0 ? ` var ${hoisted.join(', ')};${announce ? '' : ' '}` : '';
+  const announceText = announce ? ` ${announce} ` : '';
+  return { start, end: alternate.end, text: `else {${inner}${announceText}}`, removedSpans };
 }
 
 /**

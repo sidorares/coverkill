@@ -89,9 +89,11 @@ By default, matching files are **modified in place**. Use git so you can revert.
 - `-c, --config <path>` — config file path (global)
 - `run --dry-run` — show what would be removed without writing
 - `run --save-report <path>` — also write the coverage report JSON
+- `run --prune-mode <mode>` — `silent` (default), `throw`, or `beacon`; see [Loud stub mode](#loud-stub-mode)
 - `collect -o, --out <path>` — report destination (default `coverkill-coverage.json`)
 - `prune -r, --report <path>` — report to prune from (required)
 - `prune --dry-run` — show what would be removed without writing
+- `prune --prune-mode <mode>` — `silent` (default), `throw`, or `beacon`; see [Loud stub mode](#loud-stub-mode)
 - `import -o, --out <path>` — report destination (default `coverkill-coverage.json`)
 - `import --root-dir <path>` — `rootDir` recorded in the report (default: cwd)
 - `import --strip-source` — store only source hashes, not the source text
@@ -212,9 +214,44 @@ Prune-side options:
 | `sourcePath(url)` | Map coverage URL → local file path; `null` skips the URL |
 | `preserveLicenseHeader` | Keep leading license comments (default `true`) |
 | `cssSafelist` | Regexes; CSS rules whose selector matches are always kept |
+| `pruneMode` | `silent` (default), `throw`, or `beacon` — see [Loud stub mode](#loud-stub-mode) |
 
 `rootDir` (shared) anchors relative paths and glob matching; it defaults to the
 process working directory.
+
+## Loud stub mode
+
+Pruning is unsound by construction: a branch your scenarios never covered is
+indistinguishable from dead code. When the premise fails — the path was
+reachable, your scenarios just never took it — the default (`silent`) stubs
+misbehave invisibly: a feature-flag branch evaluates to `0`, a hollowed
+function returns `undefined`. `pruneMode` makes stubs announce themselves
+instead:
+
+- **`throw`** — every stub throws when it executes:
+
+  ```js
+  if (x) { throw new Error("coverkill: pruned path executed (dist/app.js:412)"); }
+  // expression positions stay expressions:
+  const v = flag ? (() => { throw new Error("coverkill: pruned path executed (dist/app.js:88)"); })() : other;
+  ```
+
+- **`beacon`** — every stub calls `globalThis.__coverkillPrunedPathHit?.(location)`
+  and then behaves exactly like the silent stub, so a missing collector — or a
+  page you cannot afford to break — keeps working. Install a collector that
+  reports to your telemetry and staging traffic will flag reachable-but-pruned
+  paths without crashing anything.
+
+Locations are `path:line` in the *original* file, so an announcement is
+greppable in version control even though the pruned output has shifted.
+
+The intended workflow mirrors production runtime-driven dead-code elimination:
+prune with `--prune-mode throw` (or `beacon`) into a staging build, watch it
+under real traffic, and once nothing fires, ship the `silent` build. Loud stubs
+cost bytes — expression positions need the IIFE form — which is why this is
+opt-in rather than the default. Statically deleted code (never-called,
+unreferenced functions) stays deleted in every mode; calling it was already a
+loud `ReferenceError`. `catch` blocks are never pruned in any mode.
 
 ## How it works
 
@@ -237,6 +274,8 @@ process working directory.
      logical-expression branches become `0`; unexecuted callbacks keep their
      signature with an emptied body; switch cases keep their own labels;
    - `catch` blocks are never pruned, so error reporting survives;
+   - in [loud stub mode](#loud-stub-mode) each of these stubs also announces
+     itself if it ever executes;
    - the result must re-parse or the file is left unchanged.
 5. Prunes CSS structurally: whole rules only. `@media`/`@supports`/`@layer`
    shells are preserved whenever any inner rule survives, and at-rules Chrome
@@ -249,8 +288,9 @@ Coverage reflects **what the browser executed during your scenarios**. Anything
 your scenarios did not exercise — error paths, other locales or viewports,
 feature-flagged branches, `:hover` styles you never hovered — is indistinguishable
 from dead code. Use `--dry-run`, review diffs, keep everything under version
-control, and use `cssSafelist` for styles that only apply in states your
-scenarios do not visit.
+control, use `cssSafelist` for styles that only apply in states your
+scenarios do not visit, and stage a [loud stub build](#loud-stub-mode) before
+shipping the silent one.
 
 Known blind spots: coverage is Chromium-only and per-page — code running in web
 workers, service workers, iframes, or popups is not observed. Files served with

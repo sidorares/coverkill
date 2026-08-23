@@ -27,6 +27,12 @@ import { validateReport } from '../../src/report/io.js';
 import { normalizeReport } from '../../src/report/normalize.js';
 import type { CoverageReportV2 } from '../../src/report/types.js';
 import { removeUncoveredRanges } from '../../src/prune/ranges.js';
+import type { PruneMode } from '../../src/prune/stubs.js';
+
+export type DifferentialOptions = {
+  /** Loud stub mode to prune with (default silent). */
+  pruneMode?: PruneMode;
+};
 
 export type DifferentialResult = {
   /** stdout lines from running the fixture as written */
@@ -146,7 +152,10 @@ function assertOffsetsAligned(functions: V8CoverageFunctions, source: string): v
  * Run `fixtureSource` under real V8 coverage, prune it with coverkill's
  * pipeline, run the pruned source, and return both stdout captures.
  */
-export async function runDifferential(fixtureSource: string): Promise<DifferentialResult> {
+export async function runDifferential(
+  fixtureSource: string,
+  options: DifferentialOptions = {},
+): Promise<DifferentialResult> {
   const root = await ensureTmpRoot();
   const id = ++fixtureCounter;
   const dir = path.join(root, `fixture-${id}`);
@@ -191,6 +200,8 @@ export async function runDifferential(fixtureSource: string): Promise<Differenti
     stubRanges: entry.stubRanges,
     kind: 'js',
     sourceType: entry.sourceType,
+    pruneMode: options.pruneMode,
+    stubLabel: `fixture-${id}.cjs`,
   });
   const changed = prunedSource !== fixtureSource;
 
