@@ -2,6 +2,7 @@ import { loadConfig, loadPruneConfig } from './config/load.js';
 import { defineConfig } from './config/defineConfig.js';
 import { saveReport, loadReport } from './report/io.js';
 import { importV8CoverageFiles } from './report/import.js';
+import { mergeReports } from './report/merge-reports.js';
 import type { CoverageReport, CoverageReportV2 } from './report/types.js';
 import { pruneFromReport, formatPruneResult } from './prune/prune.js';
 
@@ -37,6 +38,7 @@ export {
   type ImportOptions,
   type ImportFilesOptions,
 } from './report/import.js';
+export { mergeReports, type MergeReportsOptions } from './report/merge-reports.js';
 export { extractJsCoverage } from './report/v8.js';
 export { hashSource } from './report/hash.js';
 export {
@@ -72,6 +74,14 @@ export type ImportCliOptions = {
   rootDir?: string;
   /** Keep only source hashes, dropping embedded source text. */
   stripSource?: boolean;
+};
+
+export type MergeCliOptions = {
+  /** Coverage reports and/or raw V8 inputs — anything `loadReport` accepts. */
+  inputs: string[];
+  saveReport?: string;
+  /** rootDir for the merged report; required when the inputs disagree. */
+  rootDir?: string;
 };
 
 /** Collect coverage and prune in one go (the `coverkill run` command). */
@@ -124,4 +134,25 @@ export async function importCoverage(options: ImportCliOptions): Promise<Coverag
     await saveReport(report, options.saveReport);
   }
   return report;
+}
+
+/**
+ * Union coverage from several runs into one report v2 (the `coverkill merge`
+ * command). Covered-anywhere-wins: the merged report concatenates the raw V8
+ * entries and pruning applies the same per-file union it applies to any
+ * multi-entry report. Needs no config file.
+ */
+export async function mergeCoverage(options: MergeCliOptions): Promise<CoverageReportV2> {
+  const reports: CoverageReport[] = [];
+  for (const input of options.inputs) {
+    reports.push(await loadReport(input));
+  }
+  const merged = mergeReports(reports, {
+    rootDir: options.rootDir,
+    sourceNames: options.inputs,
+  });
+  if (options.saveReport) {
+    await saveReport(merged, options.saveReport);
+  }
+  return merged;
 }

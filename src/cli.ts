@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { Command } from 'commander';
-import { run, collect, prune, importCoverage } from './index.js';
+import { run, collect, prune, importCoverage, mergeCoverage } from './index.js';
 
 const pkg = createRequire(import.meta.url)('../package.json') as { version: string };
 
@@ -59,6 +59,31 @@ program
     const { scripts, stylesheets } = report;
     console.log(
       `Imported ${scripts.length} script(s) and ${stylesheets.length} stylesheet(s) to ${opts.out}`,
+    );
+  });
+
+program
+  .command('merge')
+  .description(
+    'Union coverage from multiple runs into one report (covered-anywhere-wins): ' +
+      'a byte that executed in any run is covered',
+  )
+  .argument(
+    '<reports...>',
+    'Coverage reports: coverkill v2 JSON, raw V8/DevTools dumps, or NODE_V8_COVERAGE directories',
+  )
+  .option('-o, --out <path>', 'Where to write the merged report JSON', 'coverkill-coverage.json')
+  .option('--root-dir <path>', 'rootDir recorded in the merged report (required when inputs disagree)')
+  .action(async (inputs: string[], opts) => {
+    const report = await mergeCoverage({
+      inputs,
+      saveReport: opts.out,
+      rootDir: opts.rootDir,
+    });
+    const { scripts, stylesheets } = report;
+    console.log(
+      `Merged ${inputs.length} run(s): ${scripts.length} script(s) and ` +
+        `${stylesheets.length} stylesheet(s) to ${opts.out}`,
     );
   });
 
