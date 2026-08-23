@@ -1,6 +1,6 @@
 {
   "name": "coverkill",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Remove unused JS and CSS based on Chrome coverage reports",
   "type": "module",
   "license": "MIT",
