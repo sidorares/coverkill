@@ -21,9 +21,9 @@ jobs:
       # Everything below runs only when a release PR is merged and a release is
       # cut. Publishing needs an NPM_TOKEN repository secret; until one is set,
       # these steps simply never run.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: ${{ steps.release.outputs.release_created }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: ${{ steps.release.outputs.release_created }}
         with:
           node-version: '22'
