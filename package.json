@@ -1,6 +1,6 @@
 {
   "name": "coverkill",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Remove unused JS and CSS based on Chrome coverage reports",
   "type": "module",
   "license": "MIT",
@@ -28,6 +28,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./collect": {
+      "types": "./dist/collect/index.d.ts",
+      "import": "./dist/collect/index.js"
+    },
+    "./prune": {
+      "types": "./dist/prune/index.d.ts",
+      "import": "./dist/prune/index.js"
     }
   },
   "main": "./dist/index.js",
@@ -44,17 +52,18 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "example": "tsx src/cli.ts --config examples/minimal-vite/coverkill.config.ts",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
     "playwright": ">=1.40.0"
   },
   "peerDependenciesMeta": {
     "playwright": {
-      "optional": false
+      "optional": true
     }
   },
   "dependencies": {
+    "acorn": "^8.16.0",
     "commander": "^13.1.0",
     "cosmiconfig": "^9.0.0",
     "fast-glob": "^3.3.3",

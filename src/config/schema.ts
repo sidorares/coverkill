@@ -14,9 +14,13 @@ const jsCoverageSchema = z.object({
   reportAnonymousScripts: z.boolean().optional(),
 });
 
+const cssCoverageSchema = z.object({
+  resetOnNavigation: z.boolean().optional(),
+});
+
 const coverageSchema = z.object({
   js: jsCoverageSchema.optional(),
-  css: z.boolean().optional(),
+  css: z.union([z.boolean(), cssCoverageSchema]).optional(),
 });
 
 const browserSchema = z.object({
@@ -34,11 +38,18 @@ const rawConfigSchema = z.object({
   include: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
   preserveLicenseHeader: z.boolean().optional(),
+  cssSafelist: z.array(z.string()).optional(),
 });
 
-export function parseConfig(raw: unknown, sourcePathFn?: CoverkillConfig['sourcePath']): ResolvedCoverkillConfig {
+export function parseConfig(
+  raw: unknown,
+  sourcePathFn?: CoverkillConfig['sourcePath'],
+): ResolvedCoverkillConfig {
   const parsed = rawConfigSchema.parse(raw);
   const rootDir = parsed.rootDir ?? process.cwd();
+  const rawCss = parsed.coverage?.css;
+  const cssEnabled = rawCss !== false;
+  const cssOptions = typeof rawCss === 'object' ? rawCss : {};
 
   return {
     ...parsed,
@@ -49,7 +60,10 @@ export function parseConfig(raw: unknown, sourcePathFn?: CoverkillConfig['source
         resetOnNavigation: parsed.coverage?.js?.resetOnNavigation ?? false,
         reportAnonymousScripts: parsed.coverage?.js?.reportAnonymousScripts ?? false,
       },
-      css: parsed.coverage?.css ?? true,
+      css: {
+        enabled: cssEnabled,
+        resetOnNavigation: cssOptions.resetOnNavigation ?? false,
+      },
     },
     browser: parsed.browser ?? { headless: true },
     preserveLicenseHeader: parsed.preserveLicenseHeader ?? true,

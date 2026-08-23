@@ -11,6 +11,11 @@ export async function loadConfig(configPath?: string): Promise<ResolvedCoverkill
     return loadConfigFile(path.resolve(configPath));
   }
 
+  const jitiLoader = async (filepath: string) => {
+    const jiti = createJiti(import.meta.url, { interopDefault: true });
+    return jiti.import(filepath);
+  };
+
   const explorer = cosmiconfig(MODULE_NAME, {
     searchPlaces: [
       'coverkill.config.ts',
@@ -20,6 +25,13 @@ export async function loadConfig(configPath?: string): Promise<ResolvedCoverkill
       'coverkill.config.cjs',
       'coverkill.config.json',
     ],
+    loaders: {
+      '.ts': jitiLoader,
+      '.mts': jitiLoader,
+      '.js': jitiLoader,
+      '.mjs': jitiLoader,
+      '.cjs': jitiLoader,
+    },
   });
 
   const result = await explorer.search();

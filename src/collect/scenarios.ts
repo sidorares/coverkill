@@ -3,7 +3,7 @@ import fg from 'fast-glob';
 import { stat } from 'node:fs/promises';
 import { createJiti } from 'jiti';
 import type { Page } from 'playwright';
-import type { ResolvedCoverkillConfig, ScenarioFn } from '../config/types.js';
+import type { ResolvedCollectConfig, ScenarioFn } from '../config/types.js';
 
 const SCENARIO_EXTENSIONS = new Set(['.ts', '.js', '.mts', '.mjs']);
 
@@ -49,16 +49,16 @@ function isScenarioFile(filePath: string): boolean {
   return SCENARIO_EXTENSIONS.has(ext) && !filePath.endsWith('.d.ts');
 }
 
-export async function runScenarios(
-  page: Page,
-  config: ResolvedCoverkillConfig,
-): Promise<void> {
+export async function loadScenarios(
+  config: ResolvedCollectConfig,
+): Promise<Array<{ file: string; fn: ScenarioFn }>> {
   const files = await expandScenarioPaths(config.scenarios);
   if (files.length === 0) {
     throw new Error(`No scenario files matched: ${config.scenarios.join(', ')}`);
   }
 
   const jiti = createJiti(import.meta.url, { interopDefault: true });
+  const scenarios: Array<{ file: string; fn: ScenarioFn }> = [];
 
   for (const file of files) {
     const mod = (await jiti.import(file)) as Record<string, unknown>;
@@ -68,6 +68,17 @@ export async function runScenarios(
         `Scenario ${file} must export a default function or named "scenario" function.`,
       );
     }
+    scenarios.push({ file, fn });
+  }
+
+  return scenarios;
+}
+
+export async function runScenarios(
+  page: Page,
+  config: ResolvedCollectConfig,
+): Promise<void> {
+  for (const { fn } of await loadScenarios(config)) {
     await fn({ page, baseURL: config.baseURL });
   }
 }

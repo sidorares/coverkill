@@ -34,7 +34,17 @@ export async function startWebServer(config: WebServerConfig): Promise<WebServer
     process.stderr.write(`[webServer] ${chunk.toString()}`);
   });
 
-  const ready = await waitForUrl(config.url, timeout);
+  let exitedEarly: number | null = null;
+  child.once('exit', (code) => {
+    exitedEarly = code ?? -1;
+  });
+
+  const ready = await waitForUrl(config.url, timeout, () => exitedEarly !== null);
+  if (exitedEarly !== null) {
+    throw new Error(
+      `webServer command exited with code ${exitedEarly} before ${config.url} became ready: ${config.command}`,
+    );
+  }
   if (!ready) {
     await stopProcess(child);
     throw new Error(`webServer did not become ready at ${config.url} within ${timeout}ms`);
@@ -61,9 +71,14 @@ async function isServerUp(url: string): Promise<boolean> {
   }
 }
 
-async function waitForUrl(url: string, timeout: number): Promise<boolean> {
+async function waitForUrl(
+  url: string,
+  timeout: number,
+  shouldAbort?: () => boolean,
+): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeout) {
+    if (shouldAbort?.()) return false;
     if (await isServerUp(url)) return true;
     await sleep(250);
   }

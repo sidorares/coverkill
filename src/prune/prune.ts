@@ -2,10 +2,11 @@ import { writeFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import type { ResolvedCoverkillConfig } from '../config/types.js';
-import type { CoverageReport } from '../coverage/types.js';
-import { invertRanges, rangesToLineNumbers } from '../coverage/merge.js';
-import { resolvePruneTargets, type ResolvedPruneTarget } from '../resolve/entries.js';
+import type { ResolvedPruneConfig } from '../config/types.js';
+import type { CoverageReport } from '../report/types.js';
+import { invertRanges, rangesToLineNumbers } from '../report/merge.js';
+import { resolvePruneTargets, type ResolvedPruneTarget } from './resolve.js';
+import { isParseableJs } from './ast-prune.js';
 import { removeUncoveredRanges } from './ranges.js';
 
 export type PruneOptions = {
@@ -31,7 +32,7 @@ export type PruneResult = {
 
 export async function pruneFromReport(
   report: CoverageReport,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedPruneConfig,
   options: PruneOptions = {},
 ): Promise<PruneResult> {
   const { targets, skipped } = await resolvePruneTargets(report, config);
@@ -47,13 +48,23 @@ export async function pruneFromReport(
 
 async function pruneTarget(
   target: ResolvedPruneTarget,
-  config: ResolvedCoverkillConfig,
+  config: ResolvedPruneConfig,
   options: PruneOptions,
 ): Promise<PruneFileResult> {
   const bytesBefore = Buffer.byteLength(target.source, 'utf8');
-  const pruned = removeUncoveredRanges(target.source, target.ranges, {
+  let pruned = removeUncoveredRanges(target.source, target.ranges, {
     preserveLicenseHeader: config.preserveLicenseHeader,
+    stubRanges: target.kind === 'js' ? target.stubRanges : undefined,
+    kind: target.kind,
+    cssSafelist: config.cssSafelist,
   });
+
+  if (target.kind === 'js' && pruned !== target.source && !isParseableJs(pruned)) {
+    console.warn(
+      `[coverkill] ${target.filePath}: pruned output is invalid JS; file left unchanged.`,
+    );
+    pruned = target.source;
+  }
   const bytesAfter = Buffer.byteLength(pruned, 'utf8');
   const uncovered = invertRanges(target.source.length, target.ranges);
   const uncoveredLines = rangesToLineNumbers(target.source, uncovered);
