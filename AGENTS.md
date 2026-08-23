@@ -48,20 +48,34 @@ Three directories, with a serialized report as the seam between the two halves:
 ```
 scenarios ──► src/collect/ ──► CoverageReport (JSON) ──► src/prune/ ──► files on disk
               needs Playwright     src/report/            pure transform, acorn only
+                                        ▲
+        any V8 coverage ────────────────┘
+   (NODE_V8_COVERAGE, CDP, Playwright, DevTools export) via src/report/import.ts
 ```
 
 The seam is load-bearing, not cosmetic: `collect` in CI, review the report,
 prune later — and library consumers who only prune never resolve Playwright.
 
+**The report carries raw V8 counts (v2), not a classification.** Whether a byte
+is covered, stub, or dead is decided in `src/report/v8.ts` at PRUNE time, so a
+report collected months ago can be re-pruned under a different policy, and any
+V8 coverage — whoever collected it — is prunable. Report v1 (pre-classified byte
+ranges) is still read; `normalizeReport` collapses both versions into the same
+`FileCoverageEntry[]` the resolver consumes.
+
 | Path | Role |
 |---|---|
 | `src/collect/browser.ts` | Orchestrates a run: web server, Chromium, coverage session lifecycle. **This is where CSS coverage is cycled per scenario** — see the navigation fact below. |
-| `src/collect/extract.ts` | V8 `ScriptCoverage` → report entries. Pure; no Playwright at runtime. Implements innermost-range-wins flattening. |
+| `src/collect/extract.ts` | V8 `ScriptCoverage` → report v2 (`buildCoverageReportV2`). Pure; no Playwright at runtime. `buildCoverageReport` still emits v1 for consumers pinned to it. |
 | `src/collect/scenarios.ts` | Scenario discovery + loading (jiti, so `.ts` scenarios work). |
 | `src/collect/webServer.ts` | Playwright-style dev-server management. |
-| `src/report/types.ts` | `CoverageReport`, `FileCoverageEntry`, `ByteRange`. The contract. |
+| `src/report/types.ts` | `CoverageReportV1`/`V2`, `ScriptCoverageEntry`, `FileCoverageEntry`, `ByteRange`. The contract. |
+| `src/report/v8.ts` | `extractJsCoverage`: innermost-range-wins flattening of raw V8 counts into covered/stub. Prune-time policy. |
+| `src/report/normalize.ts` | Either report version → the internal `FileCoverageEntry[]` model. |
+| `src/report/import.ts` | Raw `NODE_V8_COVERAGE` / CDP / Playwright / DevTools JSON → report v2, hashing `file://` sources from disk (only when the file still fits the coverage offsets). |
+| `src/report/hash.ts` | `sha256-` hashing of executed text; the guard when a report omits `source`. |
 | `src/report/merge.ts` | Range algebra: merge / subtract / invert / range→lines. |
-| `src/report/io.ts` | `saveReport` / `loadReport` + structural validation of untrusted JSON. |
+| `src/report/io.ts` | `saveReport` / `loadReport` (auto-detects raw V8 input) + structural validation of untrusted JSON. |
 | `src/prune/resolve.ts` | URL → disk path, `include`/`exclude`, and the safety guards that decide a file is unprunable. |
 | `src/prune/ast-prune.ts` | **The JS planner.** The most delicate file in the repo. |
 | `src/prune/css.ts` | Structural CSS pruner (hand-rolled scanner, no dependency). |
@@ -104,14 +118,20 @@ not the test.
    the declaration and the orphaned keyword absorbs the next statement.
 8. **Validated `'use asm'` modules are never touched.** V8 does not instrument
    them, so their count-0 coverage is meaningless.
-9. **Unmergeable coverage entries poison the whole file.** If any entry mapping
-   to a file cannot be used (source-text or kind disagreement, missing source,
-   disk mismatch, lost CSS usage), the file is skipped entirely. Pruning from a
-   subset of entries deletes code that ran during the dropped entry's run.
-10. **Re-parse validation is a backstop, not a strategy.** If a mainstream
+9. **An entry must prove which text its offsets refer to.** Either it embeds
+   the executed `source`, or its `sourceHash` matches the file on disk byte for
+   byte (no CRLF tolerance there — differing line endings shift every offset).
+   With neither, the file is skipped. A `source` that disagrees with its own
+   `sourceHash` means the report is inconsistent; skip too.
+10. **Unmergeable coverage entries poison the whole file.** If any entry mapping
+    to a file cannot be used (source-text or kind disagreement, unprovable
+    source per #9, disk mismatch, lost CSS usage), the file is skipped
+    entirely. Pruning from a subset of entries deletes code that ran during the
+    dropped entry's run.
+11. **Re-parse validation is a backstop, not a strategy.** If a mainstream
     syntax shape routinely trips it, that is a planner bug — the symptom is a
     whole file silently going unpruned.
-11. **Whitespace cleanup never enters string or template literals.** Cosmetic
+12. **Whitespace cleanup never enters string or template literals.** Cosmetic
     regexes over the whole file silently change runtime values.
 
 ## Platform facts that are expensive to rediscover
@@ -133,6 +153,8 @@ Verified against real Chromium and real `NODE_V8_COVERAGE`, not documentation.
   `for (let …)` loop whose body contains a function literal. This is why
   invariant 3 exists.
 - Offsets are **UTF-16 code units**, not bytes. Astral characters shift them.
+  Report v2 states this in `meta.offsets`; a report claiming anything else is
+  rejected rather than guessed at.
 - Coverage stops the instant the last scenario returns; late async work
   (post-click fetches, debounced handlers) is counted as unexecuted.
 
@@ -160,9 +182,10 @@ will have its worker-only paths stubbed.
 
 `test/differential/` is the oracle and the reason the pruner can be trusted.
 Each fixture is a deterministic script whose only observable behavior is
-`console.log` output. The harness runs it under real `NODE_V8_COVERAGE`, prunes
-it with the real pipeline, runs the pruned output, and asserts the output is
-identical. That catches the class of bug syntax validation cannot: **output that
+`console.log` output. The harness runs it under real `NODE_V8_COVERAGE`, wraps
+the raw payload in a report v2, serializes and validates it, classifies it at
+prune time, prunes it with the real pipeline, runs the pruned output, and
+asserts the output is identical. That catches the class of bug syntax validation cannot: **output that
 parses but behaves differently.**
 
 **Any behavioral change to the pruner needs a differential fixture.** The 36
@@ -200,11 +223,9 @@ bail-outs, `COVERKILL_DEBUG_GLOBS=1` explains include/exclude decisions.
 
 ## Where the project is going
 
-Open issues carry the roadmap and the design reasoning behind each item:
+Open issues carry the roadmap and the design reasoning behind each item
+(**#3**, raw V8 `ScriptCoverage` as the report format, shipped as report v2):
 
-- **#3** — accept raw V8 `ScriptCoverage` as the report format, so coverage from
-  DevTools, Puppeteer, or an existing `@playwright/test` suite can be pruned.
-  Most other items get easier after this one.
 - **#4** — source maps, so pruning targets `src/` instead of ephemeral `dist/`.
 - **#5** — `coverkill merge` to union coverage across runs (locales, viewports,
   flag assignments).

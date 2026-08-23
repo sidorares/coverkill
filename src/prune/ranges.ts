@@ -1,4 +1,4 @@
-import type { ByteRange } from '../report/types.js';
+import type { ByteRange, SourceType } from '../report/types.js';
 import { invertRanges, mergeRanges, subtractRanges } from '../report/merge.js';
 import { removeUncoveredRangesAst } from './ast-prune.js';
 import { pruneCss } from './css.js';
@@ -8,6 +8,8 @@ export type RemoveUncoveredOptions = {
   /** Uncovered ranges inside executed functions — replaced, not deleted */
   stubRanges?: ByteRange[];
   kind?: 'js' | 'css';
+  /** JS only: parse goal, when the report knew it. Falls back to detection. */
+  sourceType?: SourceType;
   /** CSS only: regex sources; matching selectors/preludes are always kept */
   cssSafelist?: string[];
 };

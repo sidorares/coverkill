@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { resolvePruneTargets } from './resolve.js';
-import type { CoverageReport } from '../report/types.js';
+import type { CoverageReportV1 } from '../report/types.js';
 import type { ResolvedPruneConfig } from '../config/types.js';
 import { defaultSourcePath } from '../utils/paths.js';
+import { hashSource } from '../report/hash.js';
 
 let rootDir: string;
 
@@ -17,7 +18,7 @@ function makeConfig(overrides: Partial<ResolvedPruneConfig> = {}): ResolvedPrune
   return { rootDir, preserveLicenseHeader: true, ...overrides };
 }
 
-function makeReport(entries: CoverageReport['entries']): CoverageReport {
+function makeReport(entries: CoverageReportV1['entries']): CoverageReportV1 {
   return { version: 1, collectedAt: 'now', rootDir, entries };
 }
 
@@ -138,6 +139,98 @@ describe('resolvePruneTargets', () => {
     );
     expect(targets).toEqual([]);
     expect(skipped[0]!.reason).toContain('no embedded source');
+  });
+});
+
+// Report v2 may ship a hash instead of the executed text. The hash then has to
+// carry the whole guard: the file on disk is usable only if it hashes to what
+// the collector recorded, exactly (differing line endings shift every offset,
+// so the CRLF tolerance that applies to embedded source cannot apply here).
+describe('resolvePruneTargets with hash-only entries', () => {
+  it('recovers the source from disk when the hash matches', async () => {
+    const source = 'console.log("one");\nconsole.log("two");\n';
+    await writeFile(path.join(rootDir, 'hashed.js'), source, 'utf8');
+    const { targets, skipped } = await resolvePruneTargets(
+      makeReport([
+        {
+          url: 'http://x/hashed.js',
+          sourceHash: hashSource(source),
+          kind: 'js',
+          ranges: [{ start: 0, end: 19 }],
+        },
+      ]),
+      makeConfig(),
+    );
+    expect(skipped).toEqual([]);
+    expect(targets).toHaveLength(1);
+    expect(targets[0]!.source).toBe(source);
+  });
+
+  it('skips the file when the hash does not match disk', async () => {
+    await writeFile(path.join(rootDir, 'stale.js'), 'console.log("new");\n', 'utf8');
+    const { targets, skipped } = await resolvePruneTargets(
+      makeReport([
+        {
+          url: 'http://x/stale.js',
+          sourceHash: hashSource('console.log("old");\n'),
+          kind: 'js',
+          ranges: [{ start: 0, end: 19 }],
+        },
+      ]),
+      makeConfig(),
+    );
+    expect(targets).toEqual([]);
+    expect(skipped[0]!.reason).toContain('does not match sourceHash');
+  });
+
+  it('skips the file when embedded source and its own hash disagree', async () => {
+    const source = 'console.log("one");\n';
+    await writeFile(path.join(rootDir, 'inconsistent.js'), source, 'utf8');
+    const { targets, skipped } = await resolvePruneTargets(
+      makeReport([
+        {
+          url: 'http://x/inconsistent.js',
+          source,
+          sourceHash: hashSource('something else'),
+          kind: 'js',
+          ranges: [{ start: 0, end: 19 }],
+        },
+      ]),
+      makeConfig(),
+    );
+    expect(targets).toEqual([]);
+    expect(skipped[0]!.reason).toContain('its own sourceHash');
+  });
+
+  it('accepts a v2 report directly and carries sourceType through', async () => {
+    const source = 'export const a = 1;\nconsole.log(a);\n';
+    await writeFile(path.join(rootDir, 'mod.js'), source, 'utf8');
+    const { targets } = await resolvePruneTargets(
+      {
+        version: 2,
+        meta: { collectedAt: 'now', offsets: 'utf16CodeUnits' },
+        rootDir,
+        scripts: [
+          {
+            url: 'http://x/mod.js',
+            sourceType: 'module',
+            sourceHash: hashSource(source),
+            functions: [
+              {
+                functionName: '',
+                isBlockCoverage: true,
+                ranges: [{ startOffset: 0, endOffset: source.length, count: 1 }],
+              },
+            ],
+          },
+        ],
+        stylesheets: [],
+      },
+      makeConfig(),
+    );
+    expect(targets).toHaveLength(1);
+    expect(targets[0]!.sourceType).toBe('module');
+    expect(targets[0]!.source).toBe(source);
   });
 });
 

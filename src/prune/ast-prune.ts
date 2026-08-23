@@ -1,6 +1,6 @@
 import * as acorn from 'acorn';
 import type { Node, Program } from 'acorn';
-import type { ByteRange } from '../report/types.js';
+import type { ByteRange, SourceType } from '../report/types.js';
 import { invertRanges, mergeRanges } from '../report/merge.js';
 import type { RemoveUncoveredOptions } from './ranges.js';
 
@@ -31,13 +31,27 @@ const PARSE_ATTEMPTS: ParseAttempt[] = [
   { sourceType: 'script', allowReturnOutsideFunction: true },
 ];
 
+/**
+ * When the report states the parse goal (report v2 carries `sourceType`), try
+ * it first: sources that parse under both goals mean different things, and
+ * guessing "script" for a module misreads them. The rest of the chain still
+ * follows, so a wrong or missing hint only costs a parse attempt.
+ */
+function parseAttemptsFor(sourceType?: SourceType): ParseAttempt[] {
+  if (!sourceType) return PARSE_ATTEMPTS;
+  return [
+    ...PARSE_ATTEMPTS.filter((a) => a.sourceType === sourceType),
+    ...PARSE_ATTEMPTS.filter((a) => a.sourceType !== sourceType),
+  ];
+}
+
 type ParseError = { message: string; pos: number | null };
 
 type ParseResult = { ast: Program; errors: null } | { ast: null; errors: ParseError[] };
 
-function parseAuto(source: string): ParseResult {
+function parseAuto(source: string, sourceType?: SourceType): ParseResult {
   const errors: ParseError[] = [];
-  for (const attempt of PARSE_ATTEMPTS) {
+  for (const attempt of parseAttemptsFor(sourceType)) {
     try {
       const ast = acorn.parse(source, {
         ecmaVersion: 'latest',
@@ -56,8 +70,8 @@ function parseAuto(source: string): ParseResult {
   return { ast: null, errors };
 }
 
-export function isParseableJs(source: string): boolean {
-  return parseAuto(source).ast !== null;
+export function isParseableJs(source: string, sourceType?: SourceType): boolean {
+  return parseAuto(source, sourceType).ast !== null;
 }
 
 /** Planning context shared by the recursive edit planner. */
@@ -89,7 +103,7 @@ export function removeUncoveredRangesAst(
   covered: ByteRange[],
   options?: RemoveUncoveredOptions,
 ): string | null {
-  const parsed = parseAuto(source);
+  const parsed = parseAuto(source, options?.sourceType);
   if (parsed.ast === null) {
     debugAst('initial parse failed in script, module, and CJS modes');
     return null;
@@ -122,7 +136,7 @@ export function removeUncoveredRangesAst(
 
     // Re-parse both to validate and to find string/template spans that the
     // cosmetic whitespace cleanup must not touch.
-    const reparsed = parseAuto(edited);
+    const reparsed = parseAuto(edited, options?.sourceType);
     if (reparsed.ast !== null) {
       return cleanupWhitespace(edited, collectProtectedSpans(reparsed.ast));
     }

@@ -35,6 +35,16 @@ export type BrowserConfig = {
   channel?: string;
 };
 
+export type ReportConfig = {
+  /**
+   * Embed each script's/stylesheet's executed text in the report (default
+   * true). With `false` only its `sha256-` hash is written, which shrinks
+   * reports enormously; pruning then requires the on-disk file to hash
+   * identically.
+   */
+  includeSource?: boolean;
+};
+
 /** Options used by `coverkill collect` — everything that drives the browser. */
 export type CollectConfigInput = {
   baseURL: string;
@@ -43,6 +53,7 @@ export type CollectConfigInput = {
   webServer?: WebServerConfig;
   coverage?: CoverageConfig;
   browser?: BrowserConfig;
+  report?: ReportConfig;
 };
 
 /** Options used by `coverkill prune` — everything that rewrites files on disk. */
@@ -69,6 +80,7 @@ export type ResolvedCollectConfig = {
     css: { enabled: boolean; resetOnNavigation: boolean };
   };
   browser: BrowserConfig;
+  report: Required<ReportConfig>;
 };
 
 export type ResolvedPruneConfig = {

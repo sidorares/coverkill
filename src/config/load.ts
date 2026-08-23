@@ -1,8 +1,8 @@
 import { cosmiconfig } from 'cosmiconfig';
 import { createJiti } from 'jiti';
 import path from 'node:path';
-import { parseConfig } from './schema.js';
-import type { CoverkillConfig, ResolvedCoverkillConfig } from './types.js';
+import { parseConfig, parsePruneConfig } from './schema.js';
+import type { CoverkillConfig, ResolvedCoverkillConfig, ResolvedPruneConfig } from './types.js';
 
 const MODULE_NAME = 'coverkill';
 
@@ -11,6 +11,42 @@ export async function loadConfig(configPath?: string): Promise<ResolvedCoverkill
     return loadConfigFile(path.resolve(configPath));
   }
 
+  const found = await searchConfig();
+  if (!found) {
+    throw new Error(
+      `No coverkill config found. Create coverkill.config.ts or pass --config <path>.`,
+    );
+  }
+  return normalizeLoaded(found.filepath, found.config);
+}
+
+/**
+ * Config for the prune half alone. Collect-only keys are optional here, so
+ * coverage collected by someone else's runner can be pruned without inventing
+ * a `baseURL` and a scenario list that would never run.
+ */
+export async function loadPruneConfig(configPath?: string): Promise<ResolvedPruneConfig> {
+  if (configPath) {
+    const filepath = path.resolve(configPath);
+    const loaded = await readConfigFile(filepath);
+    return normalizePruneLoaded(filepath, loaded);
+  }
+
+  const found = await searchConfig();
+  if (!found) {
+    // Prune is explicit about what it touches (a report, an include list, and
+    // --dry-run); refusing to run without a config file would block the whole
+    // "prune coverage collected elsewhere" path for no safety gain.
+    console.warn(
+      '[coverkill] No coverkill config found; pruning with defaults ' +
+        `(rootDir=${process.cwd()}, no include allowlist).`,
+    );
+    return parsePruneConfig({});
+  }
+  return normalizePruneLoaded(found.filepath, found.config);
+}
+
+async function searchConfig(): Promise<{ filepath: string; config: unknown } | null> {
   const jitiLoader = async (filepath: string) => {
     const jiti = createJiti(import.meta.url, { interopDefault: true });
     return jiti.import(filepath);
@@ -35,32 +71,28 @@ export async function loadConfig(configPath?: string): Promise<ResolvedCoverkill
   });
 
   const result = await explorer.search();
-  if (!result) {
-    throw new Error(
-      `No coverkill config found. Create coverkill.config.ts or pass --config <path>.`,
-    );
-  }
-
+  if (!result) return null;
   if (result.isEmpty) {
     throw new Error(`Config file ${result.filepath} is empty.`);
   }
+  return { filepath: result.filepath, config: result.config };
+}
 
-  return normalizeLoaded(result.filepath, result.config);
+async function readConfigFile(filepath: string): Promise<unknown> {
+  if (path.extname(filepath) === '.json') {
+    const { readFile } = await import('node:fs/promises');
+    return JSON.parse(await readFile(filepath, 'utf8'));
+  }
+  const jiti = createJiti(import.meta.url, { interopDefault: true });
+  return jiti.import(filepath);
 }
 
 async function loadConfigFile(filepath: string): Promise<ResolvedCoverkillConfig> {
-  const ext = path.extname(filepath);
-  if (ext === '.json') {
-    const { readFile } = await import('node:fs/promises');
-    const raw = JSON.parse(await readFile(filepath, 'utf8'));
-    return parseConfig(raw);
+  const loaded = await readConfigFile(filepath);
+  if (path.extname(filepath) === '.json') {
+    return parseConfig(loaded);
   }
-
-  const jiti = createJiti(import.meta.url, {
-    interopDefault: true,
-  });
-  const mod = await jiti.import(filepath);
-  return normalizeLoaded(filepath, mod);
+  return normalizeLoaded(filepath, loaded);
 }
 
 function normalizeLoaded(filepath: string, loaded: unknown): ResolvedCoverkillConfig {
@@ -77,6 +109,17 @@ function normalizeLoaded(filepath: string, loaded: unknown): ResolvedCoverkillCo
   );
   if (resolved.webServer?.cwd && !path.isAbsolute(resolved.webServer.cwd)) {
     resolved.webServer.cwd = path.resolve(configDir, resolved.webServer.cwd);
+  }
+  return resolved;
+}
+
+function normalizePruneLoaded(filepath: string, loaded: unknown): ResolvedPruneConfig {
+  const config = unwrapConfig(loaded);
+  const sourcePathFn = typeof config.sourcePath === 'function' ? config.sourcePath : undefined;
+  const { sourcePath: _removed, ...serializable } = config;
+  const resolved = parsePruneConfig(serializable, sourcePathFn);
+  if (!path.isAbsolute(resolved.rootDir)) {
+    resolved.rootDir = path.resolve(path.dirname(filepath), resolved.rootDir);
   }
   return resolved;
 }

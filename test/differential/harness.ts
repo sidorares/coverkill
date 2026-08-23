@@ -21,7 +21,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { extractJsCoverage, type JsCoverageEntry } from '../../src/collect/extract.js';
+import type { JsCoverageEntry } from '../../src/collect/extract.js';
+import { hashSource } from '../../src/report/hash.js';
+import { validateReport } from '../../src/report/io.js';
+import { normalizeReport } from '../../src/report/normalize.js';
+import type { CoverageReportV2 } from '../../src/report/types.js';
 import { removeUncoveredRanges } from '../../src/prune/ranges.js';
 
 export type DifferentialResult = {
@@ -163,14 +167,30 @@ export async function runDifferential(fixtureSource: string): Promise<Differenti
   const functions = await readCoverageFunctions(coverageDir, originalPath);
   assertOffsetsAligned(functions, fixtureSource);
 
-  const { covered, stub } = extractJsCoverage({
-    url: pathToFileURL(originalPath).href,
-    source: fixtureSource,
-    functions,
-  });
-  const prunedSource = removeUncoveredRanges(fixtureSource, covered, {
-    stubRanges: stub,
+  // Route the raw V8 payload through the real report v2 path — serialized,
+  // validated, then classified at prune time — so the oracle covers the whole
+  // seam, not just the flattener.
+  const report: CoverageReportV2 = {
+    version: 2,
+    meta: { collectedAt: '1970-01-01T00:00:00.000Z', offsets: 'utf16CodeUnits' },
+    rootDir: dir,
+    scripts: [
+      {
+        url: pathToFileURL(originalPath).href,
+        sourceType: 'script',
+        sourceHash: hashSource(fixtureSource),
+        source: fixtureSource,
+        functions,
+      },
+    ],
+    stylesheets: [],
+  };
+  const validated = validateReport(JSON.parse(JSON.stringify(report)), 'differential report');
+  const entry = normalizeReport(validated).entries[0]!;
+  const prunedSource = removeUncoveredRanges(fixtureSource, entry.ranges, {
+    stubRanges: entry.stubRanges,
     kind: 'js',
+    sourceType: entry.sourceType,
   });
   const changed = prunedSource !== fixtureSource;
 

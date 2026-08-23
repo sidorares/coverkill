@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import type { ResolvedPruneConfig } from '../config/types.js';
 import type { CoverageReport } from '../report/types.js';
+import type { NormalizedReport } from '../report/normalize.js';
 import { invertRanges, rangesToLineNumbers } from '../report/merge.js';
 import { resolvePruneTargets, type ResolvedPruneTarget } from './resolve.js';
 import { isParseableJs } from './ast-prune.js';
@@ -31,7 +32,7 @@ export type PruneResult = {
 };
 
 export async function pruneFromReport(
-  report: CoverageReport,
+  report: CoverageReport | NormalizedReport,
   config: ResolvedPruneConfig,
   options: PruneOptions = {},
 ): Promise<PruneResult> {
@@ -56,10 +57,15 @@ async function pruneTarget(
     preserveLicenseHeader: config.preserveLicenseHeader,
     stubRanges: target.kind === 'js' ? target.stubRanges : undefined,
     kind: target.kind,
+    sourceType: target.kind === 'js' ? target.sourceType : undefined,
     cssSafelist: config.cssSafelist,
   });
 
-  if (target.kind === 'js' && pruned !== target.source && !isParseableJs(pruned)) {
+  if (
+    target.kind === 'js' &&
+    pruned !== target.source &&
+    !isParseableJs(pruned, target.sourceType)
+  ) {
     console.warn(
       `[coverkill] ${target.filePath}: pruned output is invalid JS; file left unchanged.`,
     );

@@ -250,7 +250,7 @@ describe('extractJsCoverage', () => {
       ],
       [],
     );
-    expect(report.entries).toEqual([
+    expect((report as { entries: unknown[] }).entries).toEqual([
       { url: 'http://localhost/evicted.js', source: '', kind: 'js', ranges: [] },
     ]);
     expect(() => validateReport(report)).not.toThrow();

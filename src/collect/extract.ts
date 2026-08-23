@@ -1,5 +1,14 @@
+import { hashSource } from '../report/hash.js';
 import { mergeRanges } from '../report/merge.js';
-import type { ByteRange, CoverageReport, FileCoverageEntry } from '../report/types.js';
+import { extractJsCoverage } from '../report/v8.js';
+import type {
+  CoverageReportV1,
+  CoverageReportV2,
+  FileCoverageEntry,
+  ScriptCoverageEntry,
+  StyleSheetCoverageEntry,
+} from '../report/types.js';
+import { coverkillVersion } from '../version.js';
 
 /**
  * Shape of one script's coverage as reported by Playwright's
@@ -23,11 +32,79 @@ export type CssCoverageEntry = {
   ranges: Array<{ start: number; end: number }>;
 };
 
+export type BuildReportOptions = {
+  collectedAt?: string;
+  /** Recorded in meta so a report explains how it was produced. */
+  coverageSettings?: Record<string, unknown>;
+  /** Embed the executed source text alongside its hash (default true). */
+  includeSource?: boolean;
+};
+
+/**
+ * Build a report v2: V8's native counts, carried verbatim. Classification into
+ * covered / stub / dead happens at prune time, so a report collected today can
+ * be pruned under a different policy tomorrow.
+ */
+export function buildCoverageReportV2(
+  rootDir: string,
+  js: JsCoverageEntry[],
+  css: CssCoverageEntry[],
+  options: BuildReportOptions = {},
+): CoverageReportV2 {
+  const includeSource = options.includeSource ?? true;
+  const scripts: ScriptCoverageEntry[] = [];
+  const stylesheets: StyleSheetCoverageEntry[] = [];
+
+  for (const entry of js) {
+    const source = entry.source;
+    scripts.push({
+      url: entry.url,
+      scriptId: entry.scriptId,
+      sourceHash: source === undefined ? undefined : hashSource(source),
+      source: includeSource ? source : undefined,
+      functions: entry.functions,
+    });
+  }
+
+  for (const entry of css) {
+    const source = entry.text;
+    // An entry with neither text nor ranges carries no information at all;
+    // keeping it would poison a file other entries can still prune.
+    if (source === undefined && entry.ranges.length === 0) continue;
+    stylesheets.push({
+      url: entry.url,
+      sourceHash: source === undefined ? undefined : hashSource(source),
+      source: includeSource ? source : undefined,
+      ranges: mergeRanges(entry.ranges.map((r) => ({ start: r.start, end: r.end }))),
+    });
+  }
+
+  return {
+    version: 2,
+    meta: {
+      coverkillVersion: coverkillVersion(),
+      collectedAt: options.collectedAt ?? new Date().toISOString(),
+      offsets: 'utf16CodeUnits',
+      source: 'coverkill collect',
+      coverageSettings: options.coverageSettings,
+    },
+    rootDir,
+    scripts,
+    stylesheets,
+  };
+}
+
+/**
+ * Build a report v1 — classification baked in at collect time.
+ *
+ * @deprecated Superseded by {@link buildCoverageReportV2}; kept so consumers
+ * pinned to the v1 shape (and its pre-flattened ranges) still have a builder.
+ */
 export function buildCoverageReport(
   rootDir: string,
   js: JsCoverageEntry[],
   css: CssCoverageEntry[],
-): CoverageReport {
+): CoverageReportV1 {
   const entries: FileCoverageEntry[] = [];
 
   for (const entry of js) {
@@ -76,179 +153,4 @@ export function buildCoverageReport(
   };
 }
 
-type Segment = { start: number; end: number; count: number; isScriptRoot?: boolean };
-
-type FnSpan = { start: number; end: number; executed: boolean };
-
-/**
- * Flatten V8 block coverage into covered/stub byte ranges.
- *
- * V8 reports one entry per function, each with nested ranges where the
- * INNERMOST range containing an offset determines its execution count. Chrome
- * always emits a whole-script entry (functionName "") whose single range spans
- * the entire source with count 1, so a naive "count > 0 means covered" pass
- * would mark everything covered. Instead we:
- *
- * 1. Sweep all ranges (sorted outer-first) with a stack to produce disjoint
- *    segments whose count comes from the innermost enclosing range.
- * 2. Segments with count > 0 are `covered`.
- * 3. Count-0 segments are classified by their innermost enclosing FUNCTION
- *    (each function's root range, ranges[0]): if that function executed, the
- *    segment is an unexecuted branch inside live code and becomes `stub`; if
- *    it never executed, the segment is dead code and is reported as neither
- *    (the pruner deletes what is neither covered nor stub).
- */
-export function extractJsCoverage(entry: JsCoverageEntry): {
-  covered: ByteRange[];
-  stub: ByteRange[];
-} {
-  let maxEnd = 0;
-  for (const fn of entry.functions) {
-    for (const r of fn.ranges) {
-      if (r.endOffset > maxEnd) maxEnd = r.endOffset;
-    }
-  }
-
-  const ranges: Segment[] = [];
-  for (const fn of entry.functions) {
-    // The whole-script entry ("" spanning everything) is the outermost node of
-    // the range tree; flag its root so a dead function whose span happens to
-    // be byte-identical (script with no trailing newline) still nests inside.
-    // count > 0 distinguishes the real script root from a dead anonymous
-    // function that happens to span the whole file.
-    const isScriptRoot =
-      fn.functionName === '' &&
-      fn.ranges[0]?.startOffset === 0 &&
-      fn.ranges[0]?.endOffset === maxEnd &&
-      fn.ranges[0]!.count > 0;
-    fn.ranges.forEach((r, i) => {
-      if (r.endOffset > r.startOffset) {
-        ranges.push({
-          start: r.startOffset,
-          end: r.endOffset,
-          count: r.count,
-          isScriptRoot: isScriptRoot && i === 0,
-        });
-      }
-    });
-  }
-  if (ranges.length === 0) return { covered: [], stub: [] };
-
-  const segments = flattenRanges(ranges);
-
-  const covered: ByteRange[] = [];
-  const uncovered: Segment[] = [];
-  for (const seg of segments) {
-    if (seg.count > 0) {
-      covered.push({ start: seg.start, end: seg.end });
-    } else {
-      uncovered.push(seg);
-    }
-  }
-
-  const stub: ByteRange[] = uncovered.length > 0 ? classifyStubs(entry, uncovered) : [];
-
-  return { covered: mergeRanges(covered), stub: mergeRanges(stub) };
-}
-
-/**
- * Turn overlapping nested ranges into disjoint segments where each segment's
- * count is the count of the innermost range containing it. Sort outer ranges
- * first (start asc, end desc) and sweep with a stack; for identical spans the
- * executed range sorts last so it lands on top of the stack and wins.
- * Offsets covered by no range at all produce no segment.
- */
-function flattenRanges(ranges: Segment[]): Segment[] {
-  const sorted = [...ranges].sort(
-    (a, b) =>
-      a.start - b.start ||
-      b.end - a.end ||
-      Number(b.isScriptRoot ?? false) - Number(a.isScriptRoot ?? false) ||
-      a.count - b.count,
-  );
-
-  const segments: Segment[] = [];
-  const stack: Segment[] = [];
-  let pos = sorted[0]!.start;
-
-  const emit = (end: number, count: number) => {
-    if (end > pos) {
-      segments.push({ start: pos, end, count });
-      pos = end;
-    }
-  };
-
-  for (const range of sorted) {
-    while (stack.length > 0 && stack[stack.length - 1]!.end <= range.start) {
-      const top = stack.pop()!;
-      emit(top.end, top.count);
-    }
-    if (stack.length > 0) {
-      emit(range.start, stack[stack.length - 1]!.count);
-    }
-    pos = Math.max(pos, range.start);
-    stack.push(range);
-  }
-  while (stack.length > 0) {
-    const top = stack.pop()!;
-    emit(top.end, top.count);
-  }
-
-  return segments;
-}
-
-/**
- * For each count-0 segment, find the innermost function whose root range
- * (ranges[0], the full function span) contains it. Segments inside an
- * executed function are stubs; segments whose innermost function never ran
- * are dead code and are dropped. Both lists are sorted by start, so a single
- * forward sweep with a stack of open functions suffices.
- */
-function classifyStubs(entry: JsCoverageEntry, uncovered: Segment[]): ByteRange[] {
-  const fns: FnSpan[] = [];
-  for (const fn of entry.functions) {
-    const root = fn.ranges[0];
-    if (!root || root.endOffset <= root.startOffset) continue;
-    fns.push({
-      start: root.startOffset,
-      end: root.endOffset,
-      executed: fn.ranges.some((r) => r.count > 0),
-    });
-  }
-  // Outer functions first; for identical spans put the dead one innermost so
-  // dead code stays deletable.
-  fns.sort(
-    (a, b) => a.start - b.start || b.end - a.end || Number(b.executed) - Number(a.executed),
-  );
-
-  const stub: ByteRange[] = [];
-  const stack: FnSpan[] = [];
-  let next = 0;
-
-  for (const seg of uncovered) {
-    while (next < fns.length && fns[next]!.start <= seg.start) {
-      while (stack.length > 0 && stack[stack.length - 1]!.end <= fns[next]!.start) {
-        stack.pop();
-      }
-      stack.push(fns[next]!);
-      next++;
-    }
-    while (stack.length > 0 && stack[stack.length - 1]!.end <= seg.start) {
-      stack.pop();
-    }
-
-    let enclosing: FnSpan | undefined;
-    for (let i = stack.length - 1; i >= 0; i--) {
-      if (stack[i]!.end >= seg.end) {
-        enclosing = stack[i];
-        break;
-      }
-    }
-
-    if (enclosing?.executed) {
-      stub.push({ start: seg.start, end: seg.end });
-    }
-  }
-
-  return stub;
-}
+export { extractJsCoverage };

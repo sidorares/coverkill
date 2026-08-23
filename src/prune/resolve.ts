@@ -1,8 +1,10 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import type { ResolvedPruneConfig } from '../config/types.js';
+import { sourceMatchesHash } from '../report/hash.js';
 import { mergeRanges } from '../report/merge.js';
-import type { CoverageReport, FileCoverageEntry } from '../report/types.js';
+import { normalizeReport, type NormalizedReport } from '../report/normalize.js';
+import type { CoverageReport, FileCoverageEntry, SourceType } from '../report/types.js';
 import { createMatchers } from '../utils/globs.js';
 import { contentMatchesDisk, defaultSourcePath } from '../utils/paths.js';
 
@@ -12,6 +14,8 @@ export type ResolvedPruneTarget = {
   ranges: FileCoverageEntry['ranges'];
   stubRanges: FileCoverageEntry['stubRanges'];
   kind: 'js' | 'css';
+  /** JS only: parse goal, when the report knew it. */
+  sourceType?: SourceType;
   url: string;
 };
 
@@ -21,9 +25,10 @@ export type ResolveResult = {
 };
 
 export async function resolvePruneTargets(
-  report: CoverageReport,
+  report: CoverageReport | NormalizedReport,
   config: ResolvedPruneConfig,
 ): Promise<ResolveResult> {
+  const normalized = 'version' in report ? normalizeReport(report) : report;
   const { isIncluded } = createMatchers(config.rootDir, config.include, config.exclude);
   let targets: ResolvedPruneTarget[] = [];
   const skipped: ResolveResult['skipped'] = [];
@@ -42,7 +47,7 @@ export async function resolvePruneTargets(
     }
   };
 
-  for (const entry of report.entries) {
+  for (const entry of normalized.entries) {
     const filePath = resolveFilePath(entry.url, config);
     if (!filePath) {
       skipped.push({ url: entry.url, reason: 'no sourcePath mapping' });
@@ -63,14 +68,15 @@ export async function resolvePruneTargets(
     }
 
     // Range offsets are only meaningful against the exact text V8 executed.
-    // Without it the entry's usage data is unrecoverable, so the whole file
-    // is unsafe to prune from its remaining entries. (Checked before the
-    // zero-range guard: sourceless entries are emitted with empty ranges.)
-    if (!entry.source) {
+    // Report v2 may omit that text, but then its hash must vouch for the file
+    // on disk. With neither, the entry's usage data is unrecoverable and the
+    // whole file is unsafe to prune from its remaining entries. (Checked
+    // before the zero-range guard: sourceless entries carry empty ranges.)
+    if (!entry.source && !entry.sourceHash) {
       poison(
         filePath,
         entry.url,
-        'report entry has no embedded source text (file skipped for safety)',
+        'report entry has no embedded source text and no sourceHash (file skipped for safety)',
       );
       continue;
     }
@@ -102,17 +108,42 @@ export async function resolvePruneTargets(
       continue;
     }
 
-    if (!contentMatchesDisk(entry.source, diskSource)) {
-      poison(
-        filePath,
-        entry.url,
-        `on-disk content does not match coverage source for ${filePath}; file skipped`,
-      );
-      continue;
+    let source: string;
+    if (entry.source !== undefined) {
+      // A hash that disagrees with the text it accompanies means the report
+      // itself is inconsistent; neither can be trusted to place offsets.
+      if (entry.sourceHash && !sourceMatchesHash(entry.source, entry.sourceHash)) {
+        poison(
+          filePath,
+          entry.url,
+          `coverage source for ${filePath} does not match its own sourceHash; file skipped`,
+        );
+        continue;
+      }
+      if (!contentMatchesDisk(entry.source, diskSource)) {
+        poison(
+          filePath,
+          entry.url,
+          `on-disk content does not match coverage source for ${filePath}; file skipped`,
+        );
+        continue;
+      }
+      // Byte offsets in the report refer to the script text V8 executed — prefer that over disk.
+      source = entry.source;
+    } else {
+      // Source omitted: the on-disk file is usable only if it hashes to what
+      // the collector recorded. Exact match required — the CRLF tolerance
+      // above cannot apply, since differing line endings shift every offset.
+      if (!sourceMatchesHash(diskSource, entry.sourceHash!)) {
+        poison(
+          filePath,
+          entry.url,
+          `on-disk content does not match sourceHash for ${filePath} (report omits source text); file skipped`,
+        );
+        continue;
+      }
+      source = diskSource;
     }
-
-    // Byte offsets in the report refer to the script text V8 executed — prefer that over disk.
-    const source = entry.source;
 
     const existing = byPath.get(filePath);
     if (existing) {
@@ -129,6 +160,12 @@ export async function resolvePruneTargets(
       }
       existing.ranges = mergeEntryRanges(existing.ranges, entry.ranges);
       existing.stubRanges = mergeEntryRanges(existing.stubRanges ?? [], entry.stubRanges ?? []);
+      // Entries disagreeing on the parse goal fall back to auto-detection.
+      if (existing.sourceType === undefined) {
+        existing.sourceType = entry.sourceType;
+      } else if (entry.sourceType !== undefined && entry.sourceType !== existing.sourceType) {
+        existing.sourceType = undefined;
+      }
     } else {
       const target: ResolvedPruneTarget = {
         filePath,
@@ -136,6 +173,7 @@ export async function resolvePruneTargets(
         ranges: [...entry.ranges],
         stubRanges: entry.stubRanges ? [...entry.stubRanges] : [],
         kind: entry.kind,
+        sourceType: entry.sourceType,
         url: entry.url,
       };
       byPath.set(filePath, target);
